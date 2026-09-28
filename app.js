@@ -47,14 +47,12 @@
       if (saved && typeof saved === "object") loaded = Object.assign(loaded, saved);
     } catch {}
 
-    if (Number(loaded.schemaVersion || 0) < DATA_VERSION) {
-      loaded.works = (loaded.works || []).filter((item) => !LEGACY_SEED_IDS.works.has(item.id));
-      loaded.authors = (loaded.authors || []).filter((item) => !LEGACY_SEED_IDS.authors.has(item.id));
-      loaded.activities = (loaded.activities || []).filter((item) => !LEGACY_SEED_IDS.activities.has(item.id));
-      loaded.conversations = (loaded.conversations || []).filter((item) => !LEGACY_SEED_IDS.conversations.has(item.id));
-      loaded.notifications = (loaded.notifications || []).filter((item) => !LEGACY_SEED_IDS.notifications.has(item.id));
-      loaded.auditLogs = (loaded.auditLogs || []).filter((item) => !LEGACY_SEED_IDS.auditLogs.has(item.id));
-    }
+    loaded.works = (loaded.works || []).filter((item) => !LEGACY_SEED_IDS.works.has(item.id));
+    loaded.authors = (loaded.authors || []).filter((item) => !LEGACY_SEED_IDS.authors.has(item.id));
+    loaded.activities = (loaded.activities || []).filter((item) => !LEGACY_SEED_IDS.activities.has(item.id));
+    loaded.conversations = (loaded.conversations || []).filter((item) => !LEGACY_SEED_IDS.conversations.has(item.id));
+    loaded.notifications = (loaded.notifications || []).filter((item) => !LEGACY_SEED_IDS.notifications.has(item.id));
+    loaded.auditLogs = (loaded.auditLogs || []).filter((item) => !LEGACY_SEED_IDS.auditLogs.has(item.id));
 
     loaded.currentUser = Object.assign({ id: "me", name: "我", role: "reader" }, loaded.currentUser || {});
     loaded.followed = Array.isArray(loaded.followed) ? loaded.followed : [];
@@ -72,6 +70,7 @@
     loaded.monthlyPicks = Array.isArray(loaded.monthlyPicks) ? loaded.monthlyPicks.filter((id) => loaded.works.some((work) => work.id === id)) : [];
     loaded.conversations = Array.isArray(loaded.conversations) ? loaded.conversations : [];
     loaded.schemaVersion = DATA_VERSION;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(loaded)); } catch {}
     return loaded;
   };
 
