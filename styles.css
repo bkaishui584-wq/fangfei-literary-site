@@ -500,6 +500,6 @@ html, body { overflow-x: hidden; }
   .reading-content { margin-top: 28px; }
   .article-aside { padding: 20px 16px; }
   .comment-section { margin-top: 24px; }
-}.hero-note-card::before { content: "关于芳菲"; }
+}.hero-note-card::before { display: none; }
 .hero-note-card > span { display: block; color: var(--seal); font-size: 12px; letter-spacing: .14em; }
 .hero-note-card > p { margin: 13px 0 0; color: var(--ink-soft); font-family: var(--serif); font-size: 17px; line-height: 1.9; }
