@@ -425,6 +425,8 @@
   document.addEventListener("click", (event) => {
     const target = event.target.closest("button");
     if (!target) return;
+    if (target.matches("#theme-button")) return openThemeChooser();
+    if (target.matches("[data-close-modal], #modal-close")) return closeModal();
     if (target.matches("[data-route]")) return setRoute(target.dataset.route);
     if (target.matches("[data-work]")) return setRoute(`work/${target.dataset.work}`);
     if (target.matches("[data-author]")) return setRoute(`author/${target.dataset.author}`);
@@ -444,7 +446,6 @@
       return showToast("主题已切换");
     }
     if (target.matches("[data-activity]")) return openModal("活动详情", `<h2 id="modal-title">${escapeHtml(byId(target.dataset.activity, state.activities).title)}</h2><p>${escapeHtml(byId(target.dataset.activity, state.activities).desc)}</p><p class="muted">报名与签到将在正式版本接入。</p>`);
-    if (target.matches("[data-close-modal]")) return closeModal();
   });
 
   document.querySelector("#publish-button").addEventListener("click", openPublish);
