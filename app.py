@@ -29,6 +29,7 @@ MAX_JSON_DEPTH = 8
 MAX_LIST_ITEMS = 100
 MAX_STRING_CHARS = 10000
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
+ADMIN_USERNAME_RE = re.compile(r"^[\w\u4e00-\u9fff]{1,32}$", re.UNICODE)
 PUBLIC_ROOTS = {"assets", "css", "images", "js", "vendor"}
 PUBLIC_FILES = {"app.js", "styles.css", "pet.js", "favicon.ico"}
 
@@ -276,19 +277,35 @@ def init_db() -> None:
 
 def ensure_admin() -> None:
     conn = sqlite3.connect(DATABASE_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
     try:
-        existing = conn.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
-        if existing:
-            return
+        existing = conn.execute("SELECT id, username FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
         password = os.getenv("ADMIN_PASSWORD", "")
+        username = (os.getenv("ADMIN_USERNAME") or "admin").strip()
+        display_name = (os.getenv("ADMIN_DISPLAY_NAME") or username or "管理员").strip()
+        if existing:
+            migrate_from = (os.getenv("ADMIN_UPDATE_FROM") or "").strip()
+            if not migrate_from or existing["username"].casefold() != migrate_from.casefold():
+                return
+            if not password:
+                raise RuntimeError("ADMIN_PASSWORD is required for administrator credential migration")
+            if not ADMIN_USERNAME_RE.fullmatch(username):
+                raise RuntimeError("ADMIN_USERNAME must be 1-32 word characters")
+            if len(password) < 12:
+                raise RuntimeError("ADMIN_PASSWORD must contain at least 12 characters")
+            conn.execute(
+                "UPDATE users SET username = ?, display_name = ?, password_hash = ? WHERE id = ?",
+                (username, display_name[:40], generate_password_hash(password), existing["id"]),
+            )
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (existing["id"],))
+            conn.commit()
+            return
         if not password:
             if IS_PRODUCTION:
                 raise RuntimeError("ADMIN_PASSWORD is required to initialize the first production administrator")
             return
-        username = (os.getenv("ADMIN_USERNAME") or "admin").strip()
-        display_name = (os.getenv("ADMIN_DISPLAY_NAME") or "管理员").strip()
-        if not USERNAME_RE.fullmatch(username):
-            raise RuntimeError("ADMIN_USERNAME must be 3-32 letters, numbers, or underscores")
+        if not ADMIN_USERNAME_RE.fullmatch(username):
+            raise RuntimeError("ADMIN_USERNAME must be 1-32 word characters")
         if len(password) < 12:
             raise RuntimeError("ADMIN_PASSWORD must contain at least 12 characters")
         conn.execute(

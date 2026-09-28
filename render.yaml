@@ -13,8 +13,8 @@ services:
       - key: DATABASE_PATH
         value: data/fangfei.sqlite3
       - key: ADMIN_USERNAME
-        value: admin
+        value: 玉年
       - key: ADMIN_DISPLAY_NAME
-        value: 管理员
+        value: 玉年
       - key: ADMIN_PASSWORD
         sync: false

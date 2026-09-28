@@ -30,9 +30,10 @@ python app.py
 
 - `FLASK_ENV=production`
 - `DATABASE_PATH=/var/data/fangfei.sqlite3`
-- `ADMIN_USERNAME=admin`
-- `ADMIN_DISPLAY_NAME=管理员`
+- `ADMIN_USERNAME=玉年`
+- `ADMIN_DISPLAY_NAME=玉年`
 - `ADMIN_PASSWORD=仅通过安全环境变量提供`
+- `ADMIN_UPDATE_FROM=旧用户名`：仅用于一次性管理员凭据迁移；匹配现有管理员后更新用户名和密码，迁移完成即可删除
 
 不要把真实密码、Token 或 API Key 写入仓库。
 
