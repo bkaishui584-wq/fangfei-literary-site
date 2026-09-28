@@ -12,8 +12,19 @@
     qingli: { name: "青璃·映界", image: "images/styles/qingli.webp", description: "清透青绿与柔和暖光交织。" }
   };
   const THEME_KEY = "fangfei_theme_v1";
+  const monthlyNotes = {
+    w1: "用一枚贝壳串起夏天与迟到的告别，细节克制，余韵很长。",
+    w2: "把车站、雪与故乡写成一封没有寄出的信，语言干净有回响。",
+    w3: "从断线的风筝写到牵挂与自由，轻盈，也有分量。"
+  };
+  const societyUpdates = [
+    { date: "09.28", title: "秋日共读会开放报名", text: "共读短篇小说集《夜晚的潜水艇》，领读人仍在招募。" },
+    { date: "09.26", title: "九月编读会完成初选", text: "编辑部从本月公开作品中选出三篇月度提名。" },
+    { date: "09.22", title: "新作者见面页上线", text: "读者可以从作品直接进入作者主页，关注或发起私信。" },
+    { date: "09.18", title: "秋季改稿会征集作品", text: "每位作者提交一篇作品，交换一次具体、完整的阅读反馈。" }
+  ];
   const seed = {
-    currentUser: { id: "me", name: "我" },
+    currentUser: { id: "me", name: "我", role: "reader" },
     followed: [],
     blocked: [],
     notifications: [
@@ -44,6 +55,11 @@
       { id: "e4", date: "11.18", title: "冬季作品改稿会", desc: "每位作者提交一篇作品，交换一次认真阅读。", status: "报名中" }
     ],
     announcements: [],
+    reports: [],
+    auditLogs: [
+      { id: "l1", text: "编辑部发布九月作品评选说明", at: "昨天" }
+    ],
+    messageSettings: { allowStrangers: true, recallMinutes: 2, notifications: true },
     monthlyPicks: ["w1", "w2", "w3"],
     conversations: [
       { id: "cv1", userId: "a1", hidden: false, unread: 2, messages: [
@@ -62,12 +78,19 @@
   };
 
   const loadState = () => {
+    let loaded;
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      return saved && saved.works ? saved : structuredClone(seed);
+      loaded = saved && saved.works ? saved : structuredClone(seed);
     } catch {
-      return structuredClone(seed);
+      loaded = structuredClone(seed);
     }
+    loaded.currentUser = Object.assign({ id: "me", name: "我", role: "reader" }, loaded.currentUser || {});
+    loaded.reports = Array.isArray(loaded.reports) ? loaded.reports : [];
+    loaded.auditLogs = Array.isArray(loaded.auditLogs) ? loaded.auditLogs : [];
+    loaded.messageSettings = Object.assign({ allowStrangers: true, recallMinutes: 2, notifications: true }, loaded.messageSettings || {});
+    loaded.monthlyPicks = Array.isArray(loaded.monthlyPicks) ? loaded.monthlyPicks : [];
+    return loaded;
   };
 
   let state = loadState();
@@ -87,6 +110,22 @@
   const byId = (id, list) => list.find((item) => item.id === id);
   const authorById = (id) => byId(id, state.authors) || { name: id, bio: "", works: 0, awards: 0 };
   const workById = (id) => byId(id, state.works);
+  const isAdmin = () => state.currentUser?.role === "admin";
+  const worksByAuthor = (name) => state.works.filter((work) => work.author === name);
+  const readingMinutes = (work) => Math.max(1, Math.round(work.body.join("").length / 420));
+  const formatRelativeTime = (value) => {
+    const diff = Date.now() - new Date(value).getTime();
+    if (!Number.isFinite(diff) || diff < 0) return "刚刚";
+    if (diff < 60000) return "刚刚";
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
+    return `${Math.floor(diff / 86400000)} 天前`;
+  };
+
+  function recordAudit(text) {
+    state.auditLogs.unshift({ id: `l${Date.now()}`, text, at: "刚刚" });
+    state.auditLogs = state.auditLogs.slice(0, 30);
+  }
 
   function showToast(message) {
     toast.textContent = message;
@@ -137,6 +176,9 @@
       const target = button.dataset.route;
       button.classList.toggle("is-active", route === target || route.startsWith(`${target}/`));
     });
+    document.querySelectorAll("[data-admin-only]").forEach((element) => { element.hidden = !isAdmin(); });
+    const userButton = document.querySelector("#user-button");
+    if (userButton) userButton.innerHTML = `<span>${escapeHtml(state.currentUser.name.slice(0, 1))}</span> ${isAdmin() ? "管理员" : "读者"}`;
     const unread = state.conversations.filter((conversation) => !conversation.hidden).reduce((sum, conversation) => sum + conversation.unread, 0);
     const unreadElement = document.querySelector("#nav-unread");
     unreadElement.textContent = unread;
@@ -148,32 +190,73 @@
   }
 
   function workCard(work) {
-    return `<article class="work-card">
-      <span class="work-category">${escapeHtml(work.category)}</span>
-      <h3 class="work-card-title">${escapeHtml(work.title)}</h3>
+    const featured = state.monthlyPicks.includes(work.id);
+    return `<article class="work-card ${featured ? "is-featured" : ""}">
+      <div class="work-card-top"><span class="work-category">${escapeHtml(work.category)}</span>${featured ? '<span class="work-flag">本月精选</span>' : ""}</div>
+      <button class="work-card-title work-title-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button>
       <p class="work-excerpt">${escapeHtml(work.excerpt)}</p>
-      <div class="work-meta"><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.author)}</button><span>${work.likes} 喜欢 · ${work.views} 阅读</span></div>
+      <div class="work-meta"><button class="link-button" type="button" data-author="${authorIdByName(work.author)}">${escapeHtml(work.author)}</button><span>${work.likes} 喜欢 · ${work.views} 阅读</span></div>
+      <div class="work-card-foot"><span>约 ${readingMinutes(work)} 分钟</span><button class="link-button" type="button" data-work="${work.id}">阅读全文</button></div>
     </article>`;
   }
 
   function renderHome() {
     const picks = state.works.slice(0, 3);
+    const lead = picks[0] || state.works[0];
+    const latest = [...state.works].reverse().slice(0, 3);
+    const hotAuthors = [...state.authors].sort((a, b) => (b.awards * 12 + b.works) - (a.awards * 12 + a.works)).slice(0, 3);
+    const activities = state.activities.slice(0, 2);
     const announcement = publishedAnnouncement();
+    const totalLikes = state.works.reduce((sum, work) => sum + work.likes, 0);
     app.innerHTML = `<div class="page">
       ${announcement ? `<div class="announcement-strip"><strong>公告</strong><span>${escapeHtml(announcement.title)}：${escapeHtml(announcement.content)}</span></div>` : ""}
-      <section class="hero">
+      <section class="hero home-hero">
         <div class="hero-copy">
           <p class="eyebrow">芳菲文学社 · 秋日卷</p>
-          <h1>让文字被读完，<span>让作者彼此看见。</span></h1>
-          <p class="hero-lead">这里收集小说、诗歌、散文与远方的来信。你可以发表作品，也可以从一段认真阅读开始，找到同路的人。</p>
-          <div class="hero-actions"><button class="button button-primary" type="button" data-route="works">开始阅读</button><button class="button" type="button" data-publish>投稿作品</button></div>
+          <h1>让文字被认真读完，<span>让写作者彼此看见。</span></h1>
+          <p class="hero-lead">发表小说、诗歌、散文和剧本，阅读同伴的新作，从作品与私信开始认识另一位写作者。</p>
+          <div class="hero-actions"><button class="button button-primary" type="button" data-route="works">开始阅读</button><button class="button" type="button" data-publish>投稿作品</button><button class="link-button" type="button" data-route="activities">查看近期活动</button></div>
         </div>
-        <aside class="hero-poem"><blockquote>“雪落在没有名字的车站<br>我把它读成一封迟到的信”</blockquote><cite>白纸《北纬三十度的雪》</cite></aside>
+        <aside class="hero-poem"><blockquote>“${lead ? escapeHtml(lead.excerpt).slice(0, 34) : "把想写的先写下来"}${lead && lead.excerpt.length > 34 ? "……" : ""}”</blockquote><cite>${lead ? `${escapeHtml(lead.author)}《${escapeHtml(lead.title)}》` : "芳菲文学社"}</cite></aside>
       </section>
-      <section class="section"><div class="section-head"><h2 class="section-title">本期推荐</h2><button class="section-link" type="button" data-route="works">查看全部作品</button></div><div class="work-grid">${picks.map(workCard).join("")}</div></section>
-      <section class="section"><div class="section-head"><h2 class="section-title">本月优秀作品</h2><button class="section-link" type="button" data-route="monthly">查看评选</button></div><div class="monthly-ribbon">${state.monthlyPicks.map((id, index) => { const work = workById(id); return work ? `<article><span>${String(index + 1).padStart(2, "0")}</span><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><small>${escapeHtml(work.author)}</small></article>` : ""; }).join("")}</div></section>
-      <section class="section"><div class="section-head"><h2 class="section-title">最近活跃的作者</h2><button class="section-link" type="button" data-route="authors">发现更多作者</button></div><div class="author-grid">${state.authors.slice(0, 3).map(authorCard).join("")}</div></section>
-      <section class="section"><div class="section-head"><h2 class="section-title">正在发生</h2></div><div class="activity-grid">${state.activities.slice(0, 2).map(activityCard).join("")}</div></section>
+
+      <section class="home-facts" aria-label="文学社概览">
+        <article><strong>${state.works.length}</strong><span>公开作品</span></article>
+        <article><strong>${state.authors.length}</strong><span>活跃作者</span></article>
+        <article><strong>${state.activities.length}</strong><span>近期活动</span></article>
+        <article><strong>${totalLikes}</strong><span>读者喜欢</span></article>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><p class="eyebrow">今日阅读</p><h2 class="section-title">精选作品</h2></div><button class="section-link" type="button" data-route="works">浏览全部作品</button></div>
+        ${lead ? `<div class="home-feature-grid"><article class="feature-work"><span class="work-category">${escapeHtml(lead.category)}</span><h3>${escapeHtml(lead.title)}</h3><p>${escapeHtml(lead.excerpt)}</p><div class="feature-work-meta"><span>${escapeHtml(lead.author)} · 约 ${readingMinutes(lead)} 分钟</span><button class="button button-small button-primary" type="button" data-work="${lead.id}">阅读今日精选</button></div></article><div class="feature-side">${picks.slice(1).map((work) => `<article class="feature-mini"><div><span class="work-category">${escapeHtml(work.category)}</span><h3>${escapeHtml(work.title)}</h3><p>${escapeHtml(work.excerpt)}</p></div><button class="link-button" type="button" data-work="${work.id}">阅读</button></article>`).join("")}</div></div>` : '<div class="empty">尚未发布作品。</div>'}
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><p class="eyebrow">编辑推荐与读者选择</p><h2 class="section-title">月度优秀作品</h2></div><button class="section-link" type="button" data-route="monthly">查看评选</button></div>
+        <div class="monthly-ribbon">${state.monthlyPicks.map((id, index) => { const work = workById(id); return work ? `<article><span>${String(index + 1).padStart(2, "0")}</span><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><small>${escapeHtml(work.author)} · ${escapeHtml(monthlyNotes[id] || "本月提名作品")}</small></article>` : ""; }).join("") || '<div class="empty">本月提名即将公布。</div>'}</div>
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><p class="eyebrow">刚刚更新</p><h2 class="section-title">最新作品</h2></div><button class="section-link" type="button" data-route="works">查看更多</button></div>
+        <div class="work-grid">${latest.map(workCard).join("")}</div>
+      </section>
+
+      <div class="section-split">
+        <section class="section">
+          <div class="section-head"><div><p class="eyebrow">本月活跃</p><h2 class="section-title">热门作者</h2></div><button class="section-link" type="button" data-route="authors">全部作者</button></div>
+          <div class="author-grid">${hotAuthors.map(authorCard).join("")}</div>
+        </section>
+        <section class="section">
+          <div class="section-head"><div><p class="eyebrow">线下与线上</p><h2 class="section-title">文学活动</h2></div><button class="section-link" type="button" data-route="activities">活动日历</button></div>
+          <div class="activity-grid">${activities.map(activityCard).join("")}</div>
+        </section>
+      </div>
+
+      <section class="section">
+        <div class="section-head"><div><p class="eyebrow">FROM FANGFEI</p><h2 class="section-title">芳菲文学社动态</h2></div></div>
+        <div class="society-feed">${societyUpdates.map((item) => `<article><time>${escapeHtml(item.date)}</time><div><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.text)}</p></div></article>`).join("")}</div>
+      </section>
     </div>`;
   }
 
@@ -210,7 +293,10 @@
   }
 
   function authorCard(author) {
-    return `<article class="author-card"><span class="avatar">${escapeHtml(author.name.slice(0, 1))}</span><h3>${escapeHtml(author.name)}</h3><p>${escapeHtml(author.bio)}</p><div class="author-meta"><span>${author.works} 篇作品</span><span>${author.awards} 次获奖</span></div><div class="form-row"><button class="button button-small" type="button" data-author="${author.id}">查看主页</button><button class="button button-small button-primary" type="button" data-message-author="${author.id}">私信</button></div></article>`;
+    const works = worksByAuthor(author.name);
+    const likes = works.reduce((sum, work) => sum + work.likes, 0);
+    const latest = works.at(-1);
+    return `<article class="author-card"><div class="author-card-head"><span class="avatar">${escapeHtml(author.name.slice(0, 1))}</span><div><h3>${escapeHtml(author.name)}</h3><span class="author-level">${author.awards ? `${author.awards} 次获奖` : "新锐作者"}</span></div></div><p>${escapeHtml(author.bio)}</p><div class="author-stats"><span><strong>${author.works}</strong> 篇作品</span><span><strong>${likes || 0}</strong> 次喜欢</span></div>${latest ? `<small class="author-latest">近期作品《${escapeHtml(latest.title)}》</small>` : ""}<div class="form-row"><button class="button button-small" type="button" data-author="${author.id}">查看主页</button><button class="button button-small button-primary" type="button" data-message-author="${author.id}">私信</button></div></article>`;
   }
 
   function renderAuthors() {
@@ -220,18 +306,25 @@
   function renderAuthor(id) {
     const author = state.authors.find((item) => item.id === id);
     if (!author) return renderMissing("这位作者暂时无法找到");
-    const works = state.works.filter((work) => work.author === author.name);
+    const works = worksByAuthor(author.name);
+    const likes = works.reduce((sum, work) => sum + work.likes, 0);
+    const categories = [...new Set(works.map((work) => work.category))];
     const followed = state.followed.includes(author.id);
-    app.innerHTML = `<div class="page"><button class="link-button" type="button" data-route="authors">← 返回作者列表</button><header class="page-head" style="margin-top:28px"><div><span class="avatar" style="width:72px;height:72px;border-radius:50%;font-size:28px">${escapeHtml(author.name.slice(0,1))}</span><h1 class="page-title" style="font-size:44px;margin-top:14px">${escapeHtml(author.name)}</h1><p class="page-note">${escapeHtml(author.bio)}</p></div><div class="form-row"><button class="button" type="button" data-follow="${author.id}">${followed ? "已关注" : "关注"}</button><button class="button button-primary" type="button" data-message-author="${author.id}">私信作者</button></div></header><section class="section"><div class="section-head"><h2 class="section-title">作品 ${author.works}</h2><span class="muted">获奖 ${author.awards}</span></div>${works.length ? `<div class="work-grid">${works.map(workCard).join("")}</div>` : '<div class="empty">这位作者还没有在演示数据中发布作品。</div>'}</section></div>`;
+    app.innerHTML = `<div class="page"><button class="link-button" type="button" data-route="authors">← 返回作者列表</button>
+      <header class="author-profile"><div class="author-profile-main"><span class="avatar">${escapeHtml(author.name.slice(0, 1))}</span><div><p class="eyebrow">作者主页</p><h1 class="page-title">${escapeHtml(author.name)}</h1><p class="page-note">${escapeHtml(author.bio)}</p><div class="tag-row">${categories.map((category) => `<span class="tag">${escapeHtml(category)}</span>`).join("")}</div></div></div><div class="author-profile-actions"><button class="button" type="button" data-follow="${author.id}">${followed ? "已关注" : "关注作者"}</button><button class="button button-primary" type="button" data-message-author="${author.id}">私信作者</button></div></header>
+      <section class="author-dashboard"><article><strong>${author.works}</strong><span>累计作品</span></article><article><strong>${likes}</strong><span>本站获赞</span></article><article><strong>${author.awards}</strong><span>获奖记录</span></article><article><strong>${works.length}</strong><span>本站收录</span></article></section>
+      <section class="section"><div class="section-head"><div><p class="eyebrow">作品集</p><h2 class="section-title">${escapeHtml(author.name)}的作品</h2></div><span class="muted">最近更新于本站作品页</span></div>${works.length ? `<div class="work-grid">${works.map(workCard).join("")}</div>` : '<div class="empty">这位作者还没有公开作品。</div>'}</section>
+    </div>`;
   }
 
   function renderMessages() {
     const visible = state.conversations.filter((conversation) => !conversation.hidden);
     const current = visible.find((conversation) => conversation.id === activeConversation) || visible[0];
+    const unread = visible.reduce((sum, conversation) => sum + conversation.unread, 0);
     if (current) activeConversation = current.id;
-    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">只对彼此可见</p><h1 class="page-title">私信</h1></div><p class="page-note">支持回复、撤回、拉黑、举报和未读状态。删除会话只会从你的列表隐藏，不会删除服务器消息。</p></header>
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">只对彼此可见</p><h1 class="page-title">私信</h1><p class="page-note">与作者讨论作品、交流写作计划。删除会话只会从你的列表隐藏，不会删除双方历史消息。</p></div><div class="message-head-actions"><span class="message-unread-summary">${unread ? `${unread} 条未读` : "消息已读完"}</span><button class="button button-small" type="button" data-message-settings>私信设置</button></div></header>
       <div class="messages-layout" style="margin-top:28px">
-        <aside class="conversation-list"><div class="conversation-list-head"><label class="search-box"><input id="conversation-search" type="search" placeholder="搜索会话"></label></div><div id="conversation-items">${visible.map(conversationItem).join("") || '<div class="empty">暂无会话</div>'}</div></aside>
+        <aside class="conversation-list"><div class="conversation-list-head"><strong>会话</strong><label class="search-box"><input id="conversation-search" type="search" placeholder="搜索作者"></label></div><div id="conversation-items">${visible.map(conversationItem).join("") || '<div class="empty">暂无会话</div>'}</div></aside>
         <section class="chat-panel">${current ? chatPanel(current) : '<div class="empty">从一个作者主页发起私信，开始第一次交流。</div>'}</section>
       </div></div>`;
     const search = document.querySelector("#conversation-search");
@@ -247,14 +340,15 @@
   function conversationItem(conversation) {
     const author = authorById(conversation.userId);
     const last = conversation.messages.filter((message) => !message.recalled).at(-1);
-    return `<button class="conversation-item ${conversation.id === activeConversation ? "is-active" : ""}" type="button" data-conversation="${conversation.id}" data-name="${escapeHtml(author.name)}"><span class="avatar">${escapeHtml(author.name.slice(0, 1))}</span><span><strong>${escapeHtml(author.name)}</strong><small>${last ? escapeHtml(last.text) : "暂无消息"}</small></span><time>${conversation.unread ? `${conversation.unread} 未读` : "已读"}</time></button>`;
+    return `<button class="conversation-item ${conversation.id === activeConversation ? "is-active" : ""}" type="button" data-conversation="${conversation.id}" data-name="${escapeHtml(author.name)}"><span class="avatar">${escapeHtml(author.name.slice(0, 1))}</span><span><strong>${escapeHtml(author.name)}</strong><small>${last ? escapeHtml(last.text) : "暂无消息"}</small></span><time>${last ? formatRelativeTime(last.at) : ""}${conversation.unread ? `<b>${conversation.unread}</b>` : ""}</time></button>`;
   }
 
   function chatPanel(conversation) {
     const author = authorById(conversation.userId);
-    return `<header class="chat-head"><strong>${escapeHtml(author.name)}</strong><div class="form-row" style="margin:0"><button class="button button-small" type="button" data-block="${conversation.id}">${state.blocked.includes(author.id) ? "解除拉黑" : "拉黑"}</button><button class="button button-small" type="button" data-report-conversation="${conversation.id}">举报</button><button class="button button-small" type="button" data-delete-conversation="${conversation.id}">删除会话</button></div></header>
+    const blocked = state.blocked.includes(author.id);
+    return `<header class="chat-head"><div><strong>${escapeHtml(author.name)}</strong><small>${blocked ? "已拉黑，暂不能发送消息" : "私信内容仅双方可见"}</small></div><div class="chat-tools"><button class="button button-small" type="button" data-block="${conversation.id}">${blocked ? "解除拉黑" : "拉黑"}</button><button class="button button-small" type="button" data-report-conversation="${conversation.id}">举报</button><button class="button button-small" type="button" data-delete-conversation="${conversation.id}">删除会话</button></div></header>
       <div class="chat-body" id="chat-body">${conversation.messages.map((message) => messageItem(conversation, message)).join("") || '<div class="empty">还没有消息，先说一句你好。</div>'}</div>
-      <form class="chat-form" id="chat-form">${replyTo ? `<div class="reply-preview"><span>回复：${escapeHtml(findMessage(conversation, replyTo)?.text || "")}</span><button type="button" data-cancel-reply>取消</button></div>` : ""}<div class="form-row" style="margin:0"><input class="input" name="message" maxlength="1000" autocomplete="off" placeholder="${state.blocked.includes(author.id) ? "已拉黑该用户" : "输入消息……"}" ${state.blocked.includes(author.id) ? "disabled" : ""}><button class="button button-primary" type="submit" ${state.blocked.includes(author.id) ? "disabled" : ""}>发送</button></div></form>`;
+      <form class="chat-form" id="chat-form">${replyTo ? `<div class="reply-preview"><span>回复：${escapeHtml(findMessage(conversation, replyTo)?.text || "")}</span><button type="button" data-cancel-reply>取消</button></div>` : ""}<div class="form-row" style="margin:0"><input class="input" name="message" maxlength="1000" autocomplete="off" placeholder="${blocked ? "已拉黑该用户" : "输入消息……"}" ${blocked ? "disabled" : ""}><button class="button button-primary" type="submit" ${blocked ? "disabled" : ""}>发送</button></div></form>`;
   }
 
   function findMessage(conversation, id) {
@@ -262,13 +356,14 @@
   }
 
   function canRecall(message) {
-    return message.mine && !message.recalled && Date.now() - message.at <= 2 * 60 * 1000;
+    const minutes = Number(state.messageSettings.recallMinutes) || 2;
+    return message.mine && !message.recalled && Date.now() - message.at <= minutes * 60 * 1000;
   }
 
   function messageItem(conversation, message) {
     const replied = message.replyTo ? findMessage(conversation, message.replyTo) : null;
     const content = message.recalled ? "这条消息已撤回" : escapeHtml(message.text);
-    return `<div class="message ${message.mine ? "is-me" : ""}"><div class="message-bubble">${replied ? `<blockquote>${escapeHtml(replied.text)}</blockquote>` : ""}${content}</div><div class="message-meta"><span>${new Date(message.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</span>${!message.recalled ? `<button type="button" data-reply="${message.id}">回复</button>` : ""}${!message.recalled ? `<button type="button" data-report-message="${message.id}">举报</button>` : ""}${canRecall(message) ? `<button type="button" data-recall="${message.id}">撤回</button>` : ""}</div></div>`;
+    return `<div class="message ${message.mine ? "is-me" : ""}"><div class="message-bubble">${replied ? `<blockquote>${escapeHtml(replied.recalled ? "这条消息已撤回" : replied.text)}</blockquote>` : ""}${content}</div><div class="message-meta"><span>${new Date(message.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</span>${!message.recalled ? `<button type="button" data-reply="${message.id}">回复</button><button type="button" data-copy-message="${message.id}">复制</button>` : ""}${!message.recalled && !message.mine ? `<button type="button" data-report-message="${message.id}">举报</button>` : ""}${canRecall(message) ? `<button type="button" data-recall="${message.id}">撤回</button>` : ""}</div></div>`;
   }
 
   function bindChat(conversation) {
@@ -289,6 +384,12 @@
     });
     document.querySelector("[data-cancel-reply]")?.addEventListener("click", () => { replyTo = null; renderMessages(); });
     document.querySelectorAll("[data-reply]").forEach((button) => button.addEventListener("click", () => { replyTo = button.dataset.reply; renderMessages(); }));
+    document.querySelectorAll("[data-copy-message]").forEach((button) => button.addEventListener("click", async () => {
+      const message = findMessage(conversation, button.dataset.copyMessage);
+      if (!message) return;
+      try { await navigator.clipboard.writeText(message.text); showToast("消息已复制"); }
+      catch { showToast("浏览器未允许复制"); }
+    }));
     document.querySelectorAll("[data-recall]").forEach((button) => button.addEventListener("click", () => {
       const message = findMessage(conversation, button.dataset.recall);
       if (!canRecall(message)) return showToast("超过可撤回时间");
@@ -309,25 +410,41 @@
     requestAnimationFrame(() => { const body = document.querySelector("#chat-body"); if (body) body.scrollTop = body.scrollHeight; });
   }
 
+  function openMessageSettings() {
+    const settings = state.messageSettings;
+    openModal("私信设置", `<form id="message-settings-form"><label class="setting-row"><span><strong>接收陌生人消息</strong><small>关闭后，未关注的作者仍可查看你的主页。</small></span><input type="checkbox" name="allowStrangers" ${settings.allowStrangers ? "checked" : ""}></label><label class="setting-row"><span><strong>消息提醒</strong><small>新消息会在顶部通知区域显示未读数量。</small></span><input type="checkbox" name="notifications" ${settings.notifications ? "checked" : ""}></label><div class="field"><label for="recall-minutes">消息可撤回时间</label><select class="select" id="recall-minutes" name="recallMinutes">${[2, 5, 10].map((minutes) => `<option value="${minutes}" ${Number(settings.recallMinutes) === minutes ? "selected" : ""}>${minutes} 分钟</option>`).join("")}</select></div></form>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-primary" type="button" id="save-message-settings">保存设置</button></div>');
+    document.querySelector("#save-message-settings").addEventListener("click", () => {
+      const form = document.querySelector("#message-settings-form");
+      const data = new FormData(form);
+      state.messageSettings = { allowStrangers: Boolean(data.get("allowStrangers")), notifications: Boolean(data.get("notifications")), recallMinutes: Number(data.get("recallMinutes")) };
+      save(); closeModal(); renderMessages(); showToast("私信设置已保存");
+    });
+  }
+
   function reportDialog(title, conversation, messageId) {
     const reasons = ["骚扰或辱骂", "色情或低俗内容", "暴力或威胁", "违法内容", "垃圾信息", "其他"];
     openModal(title, `<p>举报后只向管理员提交被举报消息和必要上下文，不会扫描全部私信。</p><form id="report-form"><div class="field"><label>举报原因</label><select class="select" name="reason">${reasons.map((reason) => `<option>${reason}</option>`).join("")}</select></div>${messageId ? `<div class="field"><label>补充说明</label><textarea class="textarea" name="detail" maxlength="500" placeholder="可补充具体情况"></textarea></div>` : ""}</form>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-danger" type="button" id="submit-report">提交举报</button></div>');
     document.querySelector("#submit-report").addEventListener("click", () => {
-      state.notifications.unshift({ id: `n${Date.now()}`, text: `举报已提交，管理员将结合必要上下文处理`, at: "刚刚", read: false });
+      const data = new FormData(document.querySelector("#report-form"));
+      const message = messageId ? findMessage(conversation, messageId) : null;
+      state.reports.unshift({ id: `r${Date.now()}`, target: authorById(conversation.userId).name, reason: String(data.get("reason")), detail: String(data.get("detail") || ""), message: message?.text || "", at: "刚刚", status: "待处理" });
+      state.notifications.unshift({ id: `n${Date.now()}`, text: "举报已提交，编辑部将结合必要上下文处理", at: "刚刚", read: false });
+      recordAudit(`收到一条针对 ${authorById(conversation.userId).name} 的举报`);
       save(); closeModal(); renderHeader(); showToast("举报已提交");
     });
   }
 
   function renderMonthly() {
     const picks = state.monthlyPicks.map(workById).filter(Boolean);
-    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">编辑推荐与读者选择</p><h1 class="page-title">月度优秀作品</h1></div><p class="page-note">每月由编辑提名，并结合阅读、评论与读者投票产生。</p></header>
-      <div class="monthly-stage">${picks.map((work, index) => `<article class="monthly-card"><span class="monthly-rank">${String(index + 1).padStart(2, "0")}</span><div><span class="work-category">${escapeHtml(work.category)}</span><h2>${escapeHtml(work.title)}</h2><p>${escapeHtml(work.excerpt)}</p><small>${escapeHtml(work.author)} · ${work.likes} 次喜欢</small><button class="link-button" type="button" data-work="${work.id}">阅读作品</button></div></article>`).join("")}</div>
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">九月 · 编辑推荐与读者选择</p><h1 class="page-title">月度优秀作品</h1><p class="page-note">编辑部依据作品完成度、语言质感与读者反馈提名，月末公布最终名单。</p></div><div class="monthly-summary"><strong>${picks.length}</strong><span>篇提名</span></div></header>
+      <div class="monthly-stage">${picks.map((work, index) => `<article class="monthly-card"><span class="monthly-rank">${String(index + 1).padStart(2, "0")}</span><div><span class="work-category">${escapeHtml(work.category)}</span><h2>${escapeHtml(work.title)}</h2><p>${escapeHtml(monthlyNotes[work.id] || work.excerpt)}</p><small>${escapeHtml(work.author)} · ${work.likes} 次喜欢 · ${work.views} 次阅读</small><button class="button button-small button-primary" type="button" data-work="${work.id}">阅读作品</button></div></article>`).join("") || '<div class="empty">本月提名即将公布。</div>'}</div>
     </div>`;
   }
 
   function renderRanking() {
-    const ranked = [...state.works].sort((a, b) => b.likes - a.likes);
-    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">读者选择</p><h1 class="page-title">排行榜</h1></div><p class="page-note">按喜欢与阅读趋势排序，每周一更新。</p></header><ol class="rank-list" style="margin-top:28px">${ranked.map((work, index) => `<li class="rank-item"><span class="rank-number">${String(index + 1).padStart(2, "0")}</span><button class="link-button rank-title" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><span class="muted">${escapeHtml(work.author)} · ${work.likes} 喜欢</span></li>`).join("")}</ol></div>`;
+    const ranked = [...state.works].sort((a, b) => b.likes - a.likes || b.views - a.views);
+    const top = ranked.slice(0, 3);
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">读者选择</p><h1 class="page-title">排行榜</h1><p class="page-note">按读者喜欢排序，阅读量作为同票时的参考。榜单每周一更新。</p></div></header><div class="rank-podium">${top.map((work, index) => `<article class="rank-podium-card rank-${index + 1}"><span>${index + 1}</span><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><small>${escapeHtml(work.author)}</small><strong>${work.likes} 喜欢</strong></article>`).join("")}</div><ol class="rank-list">${ranked.slice(3).map((work, index) => `<li class="rank-item"><span class="rank-number">${String(index + 4).padStart(2, "0")}</span><button class="link-button rank-title" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><span class="muted">${escapeHtml(work.author)} · ${work.likes} 喜欢 · ${work.views} 阅读</span></li>`).join("")}</ol></div>`;
   }
 
   function activityCard(activity) {
@@ -339,8 +456,9 @@
   }
 
   function renderAdmin() {
+    if (!isAdmin()) return renderMissing("需要管理员权限才能进入管理后台");
     const tabs = ["概览", "作品审核", "评论管理", "私信举报", "用户管理", "月度评选", "文学活动", "公告", "Agent 审核", "安全日志"];
-    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">运营控制台</p><h1 class="page-title">管理后台</h1></div><p class="page-note">正式版必须由服务端校验管理员权限。当前预览版使用模拟审核数据。</p></header><nav class="admin-tabs">${tabs.map((tab) => `<button class="${adminTab === tab ? "is-active" : ""}" type="button" data-admin-tab="${tab}">${tab}</button>`).join("")}</nav><section id="admin-content">${adminContent()}</section></div>`;
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">运营控制台</p><h1 class="page-title">管理后台</h1><p class="page-note">维护公开内容、举报记录、月度评选和文学社公告。</p></div></header><nav class="admin-tabs">${tabs.map((tab) => `<button class="${adminTab === tab ? "is-active" : ""}" type="button" data-admin-tab="${tab}">${tab}</button>`).join("")}</nav><section id="admin-content">${adminContent()}</section></div>`;
     document.querySelectorAll("[data-admin-tab]").forEach((button) => button.addEventListener("click", () => { adminTab = button.dataset.adminTab; renderAdmin(); }));
     bindAdminActions();
   }
@@ -351,23 +469,31 @@
       const content = document.querySelector("#admin-ann-content").value.trim();
       if (!title || !content) return showToast("请填写公告标题和内容");
       state.announcements.unshift({ id: `ann${Date.now()}`, title, content, status: "published", at: "刚刚" });
+      recordAudit(`发布公告《${title}》`);
       save(); renderAdmin(); showToast("公告已发布");
     });
     document.querySelectorAll("[data-ann-toggle]").forEach((button) => button.addEventListener("click", () => {
       const item = state.announcements.find((announcement) => announcement.id === button.dataset.annToggle);
       if (!item) return;
       item.status = item.status === "published" ? "archived" : "published";
+      recordAudit(`${item.status === "published" ? "发布" : "撤回"}公告《${item.title}》`);
       save(); renderAdmin(); showToast(item.status === "published" ? "公告已发布" : "公告已撤回");
     }));
   }
 
   function adminContent() {
-    if (adminTab === "概览") return `<div class="admin-grid"><div class="metric"><strong>${state.works.length}</strong><span>作品总数</span></div><div class="metric"><strong>2</strong><span>待人工审核</span></div><div class="metric"><strong>1</strong><span>私信举报</span></div></div><ul class="admin-list"><li class="admin-row"><span>《潮汐来过的房间》</span><span class="muted">Agent 建议：允许 · LOW</span></li><li class="admin-row"><span>一条争议评论</span><span class="muted">待人工确认 · MEDIUM</span></li></ul>`;
-    if (adminTab === "公告") return `<div class="admin-announcement"><div class="field"><label>公告标题</label><input class="input" id="admin-ann-title" maxlength="80" placeholder="例如：十月共读会开始报名"></div><div class="field"><label>公告内容</label><textarea class="textarea" id="admin-ann-content" maxlength="1000" placeholder="填写需要告知全体用户的简短内容"></textarea></div><button class="button button-primary" type="button" id="admin-ann-create">发布公告</button></div><ul class="admin-list">${state.announcements.length ? state.announcements.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.title)}</strong><em class="admin-note">${escapeHtml(item.status === "published" ? "已发布" : "已归档")} · ${escapeHtml(item.content)}</em></span><button class="button button-small ${item.status === "published" ? "button-quiet" : "button-primary"}" type="button" data-ann-toggle="${item.id}">${item.status === "published" ? "撤回" : "发布"}</button></li>`).join("") : '<li class="empty">暂无公告</li>'}</ul>`;
-    if (adminTab === "月度评选") return `<div class="panel" style="padding:24px"><h2 class="section-title">本月提名</h2><p class="muted">当前提名作品已同步到首页和“月度优秀作品”页面。</p><ul class="admin-list">${state.monthlyPicks.map((id) => { const work = workById(id); return work ? `<li class="admin-row"><span>${escapeHtml(work.title)}</span><span class="muted">${escapeHtml(work.author)}</span></li>` : ""; }).join("")}</ul></div>`;
-    if (adminTab === "Agent 审核") return `<div class="panel" style="padding:24px"><h2 class="section-title">审核状态</h2><p>当前 Agent 为 PASSIVE。普通私信不会主动扫描；只有举报、公开作品和评论进入审核队列。</p><p class="muted">模型只输出结构化分析，最终动作由确定性 PolicyEngine 和管理员确认。</p></div>`;
-    if (adminTab === "安全日志") return `<ul class="admin-list"><li class="admin-row"><span>审核任务创建</span><span class="muted">刚刚</span></li><li class="admin-row"><span>管理者处理举报</span><span class="muted">保留处理结果，不修改原始消息</span></li></ul>`;
-    return `<div class="panel" style="padding:24px"><h2 class="section-title">${escapeHtml(adminTab)}</h2><p class="muted">这里已保留管理入口。正式版本接入服务端权限、审计和审核 API 后启用。</p></div>`;
+    const comments = state.works.flatMap((work) => work.comments.map((comment) => ({ ...comment, workTitle: work.title })));
+    if (adminTab === "概览") return `<div class="admin-grid"><div class="metric"><strong>${state.works.length}</strong><span>公开作品</span></div><div class="metric"><strong>${comments.length}</strong><span>读者评论</span></div><div class="metric"><strong>${state.reports.length}</strong><span>私信举报</span></div><div class="metric"><strong>${state.activities.length}</strong><span>文学活动</span></div></div><ul class="admin-list"><li class="admin-row"><span><strong>内容审核队列</strong><small class="admin-note">公开作品与评论进入常规审核，私信只在举报后检查必要上下文。</small></span><span class="muted">${state.works.length + comments.length} 项</span></li><li class="admin-row"><span><strong>Agent 状态</strong><small class="admin-note">PASSIVE · 等待人工授权</small></span><span class="muted">只辅助，不决策</span></li><li class="admin-row"><span><strong>最近一次操作</strong><small class="admin-note">${escapeHtml(state.auditLogs[0]?.text || "暂无操作记录")}</small></span><span class="muted">${escapeHtml(state.auditLogs[0]?.at || "")}</span></li></ul>`;
+    if (adminTab === "作品审核") return `<div class="panel admin-panel"><h2 class="section-title">公开作品</h2><p class="muted">作品发布后进入公开阅读区，举报或争议内容可转入人工复核。</p><ul class="admin-list">${state.works.map((work) => `<li class="admin-row"><span><strong>${escapeHtml(work.title)}</strong><small class="admin-note">${escapeHtml(work.author)} · ${escapeHtml(work.category)} · ${work.views} 阅读</small></span><span class="status-pill">已公开</span></li>`).join("")}</ul></div>`;
+    if (adminTab === "评论管理") return `<div class="panel admin-panel"><h2 class="section-title">读者评论</h2><ul class="admin-list">${comments.length ? comments.map((comment) => `<li class="admin-row"><span><strong>${escapeHtml(comment.who)}</strong><small class="admin-note">${escapeHtml(comment.text)} · 评论《${escapeHtml(comment.workTitle)}》</small></span><span class="muted">${escapeHtml(comment.at)}</span></li>`).join("") : '<li class="empty">当前没有读者评论。</li>'}</ul></div>`;
+    if (adminTab === "私信举报") return `<div class="panel admin-panel"><h2 class="section-title">私信举报</h2><p class="muted">只处理被举报消息和必要上下文，不扫描普通私信。</p><ul class="admin-list">${state.reports.length ? state.reports.map((report) => `<li class="admin-row"><span><strong>${escapeHtml(report.target)} · ${escapeHtml(report.reason)}</strong><small class="admin-note">${escapeHtml(report.detail || report.message || "未补充说明")}</small></span><span class="status-pill">${escapeHtml(report.status)}</span></li>`).join("") : '<li class="empty">当前没有待处理举报。</li>'}</ul></div>`;
+    if (adminTab === "用户管理") return `<div class="panel admin-panel"><h2 class="section-title">用户与作者</h2><ul class="admin-list"><li class="admin-row"><span><strong>${escapeHtml(state.currentUser.name)}</strong><small class="admin-note">当前登录用户</small></span><span class="status-pill">${isAdmin() ? "管理员" : "读者"}</span></li>${state.authors.map((author) => `<li class="admin-row"><span><strong>${escapeHtml(author.name)}</strong><small class="admin-note">${escapeHtml(author.bio)}</small></span><span class="muted">${author.works} 篇作品</span></li>`).join("")}</ul></div>`;
+    if (adminTab === "月度评选") return `<div class="panel admin-panel"><h2 class="section-title">九月提名</h2><p class="muted">提名作品同步显示在首页与月度优秀作品页。</p><ul class="admin-list">${state.monthlyPicks.map((id, index) => { const work = workById(id); return work ? `<li class="admin-row"><span><strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(work.title)}</strong><small class="admin-note">${escapeHtml(monthlyNotes[id] || work.excerpt)}</small></span><span class="muted">${escapeHtml(work.author)}</span></li>` : ""; }).join("") || '<li class="empty">暂无提名。</li>'}</ul></div>`;
+    if (adminTab === "文学活动") return `<div class="panel admin-panel"><h2 class="section-title">活动清单</h2><ul class="admin-list">${state.activities.map((activity) => `<li class="admin-row"><span><strong>${escapeHtml(activity.title)}</strong><small class="admin-note">${escapeHtml(activity.desc)}</small></span><span class="status-pill">${escapeHtml(activity.status)}</span></li>`).join("")}</ul></div>`;
+    if (adminTab === "公告") return `<div class="admin-announcement"><div class="field"><label>公告标题</label><input class="input" id="admin-ann-title" maxlength="80" placeholder="例如：十月共读会开始报名"></div><div class="field"><label>公告内容</label><textarea class="textarea" id="admin-ann-content" maxlength="1000" placeholder="填写需要告知全体用户的简短内容"></textarea></div><button class="button button-primary" type="button" id="admin-ann-create">发布公告</button></div><ul class="admin-list">${state.announcements.length ? state.announcements.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.title)}</strong><small class="admin-note">${escapeHtml(item.status === "published" ? "已发布" : "已归档")} · ${escapeHtml(item.content)}</small></span><button class="button button-small ${item.status === "published" ? "button-quiet" : "button-primary"}" type="button" data-ann-toggle="${item.id}">${item.status === "published" ? "撤回" : "发布"}</button></li>`).join("") : '<li class="empty">暂无公告。</li>'}</ul>`;
+    if (adminTab === "Agent 审核") return `<div class="panel admin-panel"><div class="section-head"><h2 class="section-title">Agent 审核</h2><span class="status-pill">PASSIVE</span></div><div class="admin-grid"><div class="metric"><strong>${state.works.length + comments.length}</strong><span>公开内容队列</span></div><div class="metric"><strong>${state.reports.length}</strong><span>举报上下文</span></div><div class="metric"><strong>0</strong><span>自动处置</span></div></div><ul class="admin-list"><li class="admin-row"><span>风险分级<small class="admin-note">LOW · MEDIUM · HIGH · CRITICAL</small></span><span class="muted">等待审核</span></li><li class="admin-row"><span>最终动作<small class="admin-note">模型只输出结构化分析，管理员确认 ALLOW、REVIEW 或 BLOCK。</small></span><span class="muted">人工确认</span></li><li class="admin-row"><span>隐私边界<small class="admin-note">普通私信不扫描，只有举报消息和必要上下文进入审核。</small></span><span class="muted">已启用</span></li></ul></div>`;
+    if (adminTab === "安全日志") return `<div class="panel admin-panel"><h2 class="section-title">操作与审核日志</h2><ul class="admin-list">${state.auditLogs.length ? state.auditLogs.map((item) => `<li class="admin-row"><span>${escapeHtml(item.text)}</span><time class="muted">${escapeHtml(item.at)}</time></li>`).join("") : '<li class="empty">暂无操作记录。</li>'}</ul></div>`;
+    return `<div class="panel admin-panel"><h2 class="section-title">${escapeHtml(adminTab)}</h2><p class="muted">当前分类没有待处理记录。</p></div>`;
   }
 
   function renderNotifications() {
@@ -382,8 +508,10 @@
       if (!form.reportValidity()) return;
       const data = new FormData(form);
       const body = String(data.get("body")).split(/\n+/).map((line) => line.trim()).filter(Boolean);
-      state.works.unshift({ id: `w${Date.now()}`, title: String(data.get("title")), author: String(data.get("author")), category: String(data.get("category")), likes: 0, views: 0, excerpt: body[0].slice(0, 90), body, comments: [] });
+      const title = String(data.get("title"));
+      state.works.unshift({ id: `w${Date.now()}`, title, author: String(data.get("author")), category: String(data.get("category")), likes: 0, views: 0, excerpt: body[0].slice(0, 90), body, comments: [] });
       state.notifications.unshift({ id: `n${Date.now()}`, text: "作品已提交审核，等待管理员处理", at: "刚刚", read: false });
+      recordAudit(`投稿作品《${title}》进入审核队列`);
       save(); closeModal(); renderHeader(); setRoute("works"); showToast("作品已提交，等待审核");
     });
   }
@@ -426,6 +554,7 @@
     const target = event.target.closest("button");
     if (!target) return;
     if (target.matches("#theme-button")) return openThemeChooser();
+    if (target.matches("[data-message-settings]")) return openMessageSettings();
     if (target.matches("[data-close-modal], #modal-close")) return closeModal();
     if (target.matches("[data-route]")) return setRoute(target.dataset.route);
     if (target.matches("[data-work]")) return setRoute(`work/${target.dataset.work}`);
@@ -445,13 +574,13 @@
       render();
       return showToast("主题已切换");
     }
-    if (target.matches("[data-activity]")) return openModal("活动详情", `<h2 id="modal-title">${escapeHtml(byId(target.dataset.activity, state.activities).title)}</h2><p>${escapeHtml(byId(target.dataset.activity, state.activities).desc)}</p><p class="muted">报名与签到将在正式版本接入。</p>`);
+    if (target.matches("[data-activity]")) { const activity = byId(target.dataset.activity, state.activities); return openModal(activity.title, `<p>${escapeHtml(activity.desc)}</p><p class="muted">活动时间：${escapeHtml(activity.date)} · 当前状态：${escapeHtml(activity.status)}。报名通知会出现在站内消息中。</p>`); }
   });
 
   document.querySelector("#publish-button").addEventListener("click", openPublish);
   document.querySelector("#theme-button").addEventListener("click", openThemeChooser);
   document.querySelector("#notification-button").addEventListener("click", renderNotifications);
-  document.querySelector("#user-button").addEventListener("click", () => openModal("个人设置", "<p>当前为独立预览版，使用浏览器本地数据保存你的投稿、评论、私信和拉黑设置。</p><p class='muted'>正式版本将接入账号、服务端权限与审核记录。</p>"));
+  document.querySelector("#user-button").addEventListener("click", () => openModal("个人设置", `<p>${escapeHtml(state.currentUser.name)} · ${isAdmin() ? "管理员" : "读者"}</p><p class="muted">作品、评论、私信和阅读偏好保存在当前浏览器。你可以在私信页调整陌生人消息、提醒和撤回时间。</p><div class="modal-actions"><button class="button" type="button" data-route="messages">打开私信</button><button class="button button-primary" type="button" data-publish>投稿作品</button></div>`));
   modalLayer.addEventListener("click", (event) => { if (event.target === modalLayer) closeModal(); });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !modalLayer.hidden) closeModal(); });
   window.addEventListener("hashchange", () => { route = location.hash.replace(/^#\/?/, "") || "home"; render(); });

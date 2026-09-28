@@ -71,7 +71,8 @@
   randomButton.addEventListener("click", function () { settings.random = !settings.random; save(); updateUI(); });
   progress.addEventListener("input", function () { if (audio.duration) audio.currentTime = (Number(progress.value) / 100) * audio.duration; });
   audio.addEventListener("timeupdate", function () { if (audio.duration) progress.value = String((audio.currentTime / audio.duration) * 100); current.textContent = format(audio.currentTime); });
-  audio.addEventListener("loadedmetadata", function () { duration.textContent = format(audio.duration); });
+  audio.addEventListener("loadedmetadata", function () { root.hidden = false; duration.textContent = format(audio.duration); });
+  audio.addEventListener("error", function () { root.hidden = true; });
   audio.addEventListener("ended", function () { if (settings.loop === "one") { play(); return; } const atEnd = index === tracks().length - 1; if (settings.loop === "off" && atEnd && !settings.random) { playing = false; updateUI(); pet("idle"); return; } next(1); });
   new MutationObserver(function () { const nextTheme = document.documentElement.dataset.theme || "starry"; if (nextTheme === theme) return; const wasPlaying = playing; theme = nextTheme; index = 0; loadTrack(0, wasPlaying); if (wasPlaying) petHappyThenMusic(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   audio.volume = settings.volume; loadTrack(0, false); updateUI();
