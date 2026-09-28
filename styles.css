@@ -274,7 +274,7 @@ main { min-height: 72vh; }
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
 }
 
-/* ProjectHub framework pieces reused for the literary experience. */
+/* Shared theme and interface atmosphere. */
 #app { position: relative; z-index: 1; }
 .theme-atmosphere {
   position: fixed; inset: 0; z-index: 0; pointer-events: none;
@@ -441,3 +441,65 @@ html[data-theme="dragon"] { --jade: #7a765e; --jade-dark: #56533e; --seal: #9b4e
   .chat-tools { width: 100%; justify-content: flex-start; }
   .rank-podium-card, .rank-1 { min-height: 0; }
 }
+
+/* Fangfei homepage, reading, profile and mobile refinements */
+html, body { overflow-x: hidden; }
+
+.profile-summary { display: flex; align-items: center; gap: 14px; padding: 18px; border: 1px solid var(--line); background: rgba(255,255,255,.34); }
+.profile-summary .avatar { flex: 0 0 auto; width: 58px; height: 58px; border-radius: 50%; }
+.profile-summary strong, .profile-summary small { display: block; }
+.profile-summary small { margin-top: 3px; color: var(--ink-soft); }
+.profile-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+
+.work-stats { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 12px; color: var(--ink-soft); font-size: 11px; }
+.compact-empty { margin: 0; padding: 20px 12px; border: 1px dashed var(--line-strong); background: rgba(255,255,255,.22); }
+
+.home-announcement { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; padding: 24px; border: 1px solid var(--line-strong); background: rgba(255,255,255,.36); }
+.home-announcement h3 { margin: 10px 0 8px; font-family: var(--serif); font-size: 23px; }
+.home-announcement p { margin: 0; color: var(--ink-soft); }
+.home-announcement time { flex: 0 0 auto; color: var(--ink-soft); font-size: 12px; }
+
+.reading-layout { grid-template-columns: minmax(0, 1fr) minmax(260px, 300px); }
+.reading-article { max-width: 820px; width: 100%; }
+.reading-head { padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+.reading-head h1 { margin: 14px 0 16px; }
+.reading-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 16px; color: var(--ink-soft); font-size: 12px; }
+.reading-meta .link-button { padding: 0; }
+.reading-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
+.button.is-active { color: #fff; background: var(--jade-dark); border-color: var(--jade-dark); }
+.reading-content { max-width: 68ch; margin: 42px auto 0; overflow-wrap: anywhere; }
+.author-brief { display: grid; gap: 10px; }
+.author-brief .avatar { width: 54px; height: 54px; border-radius: 50%; }
+.author-brief h2 { margin: 0; font-family: var(--serif); }
+.author-brief p { margin: 0; color: var(--ink-soft); }
+.comment-section { margin-top: 30px; padding-top: 24px; border-top: 1px solid var(--line); }
+.comment-section .textarea { min-height: 86px; }
+
+@media (max-width: 980px) {
+  .reading-layout { grid-template-columns: 1fr; }
+  .reading-article { max-width: none; }
+}
+
+@media (max-width: 680px) {
+  .site-head { min-height: 66px; }
+  .site-nav { gap: 0; }
+  .site-nav button { min-height: 40px; padding: 8px 9px; }
+  .head-actions { gap: 6px; }
+  .icon-button { width: 44px; height: 44px; }
+  .user-chip { min-height: 44px; }
+  .button, .button-small { min-height: 40px; }
+  .modal-layer { padding: 10px; }
+  .modal { width: min(620px, calc(100vw - 20px)); max-height: calc(100dvh - 20px); padding: 26px 18px; box-shadow: 8px 8px 0 rgba(21,33,38,.18); }
+  .modal-close { top: 6px; right: 6px; width: 44px; height: 44px; }
+  .home-announcement { flex-direction: column; padding: 20px; }
+  .home-announcement time { order: -1; }
+  .work-card { min-height: 0; }
+  .reading-article { padding: 24px 18px; font-size: 16px; line-height: 1.95; }
+  .reading-head h1 { font-size: clamp(30px, 10vw, 44px); }
+  .reading-actions .button { flex: 1 1 calc(50% - 8px); }
+  .reading-content { margin-top: 28px; }
+  .article-aside { padding: 20px 16px; }
+  .comment-section { margin-top: 24px; }
+}.hero-note-card::before { content: "关于芳菲"; }
+.hero-note-card > span { display: block; color: var(--seal); font-size: 12px; letter-spacing: .14em; }
+.hero-note-card > p { margin: 13px 0 0; color: var(--ink-soft); font-family: var(--serif); font-size: 17px; line-height: 1.9; }
