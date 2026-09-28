@@ -5,11 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="芳菲文学社，面向青年作者的文学作品创作与交流平台。">
   <title>芳菲文学社｜写作、阅读与相遇</title>
+  <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="css/music.css">
 </head>
 <body>
   <a class="skip-link" href="#app">跳到主要内容</a>
   <div class="paper-grain" aria-hidden="true"></div>
+  <div class="theme-atmosphere" id="theme-atmosphere" aria-hidden="true"></div>
   <header class="site-head">
     <button class="brand" type="button" data-route="home" aria-label="返回首页">
       <span class="brand-seal">芳</span>
@@ -23,6 +26,7 @@
       <button type="button" data-route="works">作品</button>
       <button type="button" data-route="authors">作者</button>
       <button type="button" data-route="messages">私信 <span class="nav-count" id="nav-unread" hidden>0</span></button>
+      <button type="button" data-route="monthly">月度优秀</button>
       <button type="button" data-route="ranking">排行榜</button>
       <button type="button" data-route="activities">文学活动</button>
       <button type="button" data-route="admin">管理后台</button>
@@ -32,6 +36,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 8h18c0-1-3-1-3-8M10 21h4"/></svg>
         <span id="notification-count" hidden>0</span>
       </button>
+      <button class="button button-quiet" type="button" id="theme-button">主题</button>
       <button class="button button-quiet" type="button" id="publish-button">投稿</button>
       <button class="user-chip" type="button" id="user-button"><span>我</span> 读者</button>
     </div>
@@ -50,7 +55,27 @@
       <div id="modal-content"></div>
     </section>
   </div>
+  <div id="music-player" class="music-player is-collapsed" aria-label="网站音乐播放器">
+    <button id="music-toggle" class="music-toggle" type="button" title="网站音乐" aria-expanded="false"><i class="fa-solid fa-music" aria-hidden="true"></i></button>
+    <div class="music-panel" hidden>
+      <div class="music-head"><span>网站音乐</span><button class="music-close" type="button" data-music-close aria-label="收起播放器"><i class="fa-solid fa-xmark"></i></button></div>
+      <p id="music-track" class="music-track">暂无音乐</p>
+      <div class="music-progress-row"><span id="music-current">0:00</span><input id="music-progress" type="range" min="0" max="100" step="0.1" value="0" aria-label="播放进度"><span id="music-duration">0:00</span></div>
+      <div class="music-controls">
+        <button type="button" data-music-prev aria-label="上一首"><i class="fa-solid fa-backward-step"></i></button>
+        <button type="button" data-music-play aria-label="播放"><i class="fa-solid fa-play"></i></button>
+        <button type="button" data-music-next aria-label="下一首"><i class="fa-solid fa-forward-step"></i></button>
+      </div>
+      <div class="music-options"><input id="music-volume" type="range" min="0" max="1" step="0.01" value="0.48" aria-label="音量"><button type="button" data-music-loop aria-label="循环模式"><i class="fa-solid fa-repeat"></i></button><button type="button" data-music-random aria-label="随机播放"><i class="fa-solid fa-shuffle"></i></button></div>
+    </div>
+  </div>
+  <div id="fangfei-pet" class="fangfei-pet" data-state="idle" role="button" tabindex="0" aria-label="芳菲文学社桌宠，可拖动，点击可以互动">
+    <span class="pet-bubble" aria-live="polite" hidden></span>
+    <img src="assets/pet/pet.svg" alt="" aria-hidden="true" width="710" height="600" decoding="async" draggable="false">
+  </div>
   <div class="toast" id="toast" hidden></div>
+  <script src="js/music.js" defer></script>
+  <script src="pet.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

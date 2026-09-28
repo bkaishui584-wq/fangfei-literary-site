@@ -3,6 +3,15 @@
 
   const STORAGE_KEY = "fangfei-literary-demo-v1";
   const categories = ["全部", "小说", "诗歌", "散文", "随笔", "剧本", "科幻", "其他"];
+  const THEMES = {
+    starry: { name: "星穹·探索", image: "images/styles/starry.jpg", description: "星空、远方与未完成的句子。" },
+    deepsea: { name: "深海·幻境", image: "images/styles/deepsea.jpg", description: "安静下潜，听见文字里的回声。" },
+    sky: { name: "晴空·幻想", image: "images/styles/sky.jpg", description: "明亮轻盈，适合写下新的开始。" },
+    flower: { name: "花羽·梦境", image: "images/styles/flower.png", description: "花瓣、羽毛和柔软的叙事。" },
+    dragon: { name: "星龙·秘境", image: "images/styles/dragon.jpg", description: "史诗、奇想与辽阔的想象。" },
+    qingli: { name: "青璃·映界", image: "images/styles/qingli.webp", description: "清透青绿与柔和暖光交织。" }
+  };
+  const THEME_KEY = "fangfei_theme_v1";
   const seed = {
     currentUser: { id: "me", name: "我" },
     followed: [],
@@ -34,6 +43,8 @@
       { id: "e3", date: "11.03", title: "城市漫游与散文现场", desc: "带上纸笔，在旧街完成一段可被阅读的散步。", status: "策划中" },
       { id: "e4", date: "11.18", title: "冬季作品改稿会", desc: "每位作者提交一篇作品，交换一次认真阅读。", status: "报名中" }
     ],
+    announcements: [],
+    monthlyPicks: ["w1", "w2", "w3"],
     conversations: [
       { id: "cv1", userId: "a1", hidden: false, unread: 2, messages: [
         { id: "m1", mine: false, text: "你好！你的《潮汐来过的房间》写得很好。", at: Date.now() - 3600000, replyTo: null, recalled: false },
@@ -84,6 +95,23 @@
     showToast.timer = setTimeout(() => { toast.hidden = true; }, 2200);
   }
 
+  function applyTheme(themeId) {
+    const theme = THEMES[themeId] || THEMES.qingli;
+    const id = THEMES[themeId] ? themeId : "qingli";
+    document.documentElement.dataset.theme = id;
+    document.documentElement.style.setProperty("--theme-image", `url("${theme.image}")`);
+    localStorage.setItem(THEME_KEY, id);
+  }
+
+  function openThemeChooser() {
+    const current = document.documentElement.dataset.theme || "qingli";
+    openModal("选择主题", `<p>六套主题沿用原站视觉资源，切换后背景与音乐列表会同步变化。</p><div class="theme-options">${Object.entries(THEMES).map(([id, theme]) => `<button class="theme-option ${id === current ? "is-selected" : ""}" type="button" data-theme-choice="${id}"><img src="${theme.image}" alt=""><span><strong>${escapeHtml(theme.name)}</strong><small>${escapeHtml(theme.description)}</small></span></button>`).join("")}</div>`);
+  }
+
+  function publishedAnnouncement() {
+    return state.announcements.find((item) => item.status === "published") || null;
+  }
+
   function openModal(title, html, actions = "") {
     modalContent.innerHTML = `<h2 id="modal-title">${escapeHtml(title)}</h2>${html}${actions}`;
     modalLayer.hidden = false;
@@ -130,7 +158,9 @@
 
   function renderHome() {
     const picks = state.works.slice(0, 3);
+    const announcement = publishedAnnouncement();
     app.innerHTML = `<div class="page">
+      ${announcement ? `<div class="announcement-strip"><strong>公告</strong><span>${escapeHtml(announcement.title)}：${escapeHtml(announcement.content)}</span></div>` : ""}
       <section class="hero">
         <div class="hero-copy">
           <p class="eyebrow">芳菲文学社 · 秋日卷</p>
@@ -141,6 +171,7 @@
         <aside class="hero-poem"><blockquote>“雪落在没有名字的车站<br>我把它读成一封迟到的信”</blockquote><cite>白纸《北纬三十度的雪》</cite></aside>
       </section>
       <section class="section"><div class="section-head"><h2 class="section-title">本期推荐</h2><button class="section-link" type="button" data-route="works">查看全部作品</button></div><div class="work-grid">${picks.map(workCard).join("")}</div></section>
+      <section class="section"><div class="section-head"><h2 class="section-title">本月优秀作品</h2><button class="section-link" type="button" data-route="monthly">查看评选</button></div><div class="monthly-ribbon">${state.monthlyPicks.map((id, index) => { const work = workById(id); return work ? `<article><span>${String(index + 1).padStart(2, "0")}</span><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><small>${escapeHtml(work.author)}</small></article>` : ""; }).join("")}</div></section>
       <section class="section"><div class="section-head"><h2 class="section-title">最近活跃的作者</h2><button class="section-link" type="button" data-route="authors">发现更多作者</button></div><div class="author-grid">${state.authors.slice(0, 3).map(authorCard).join("")}</div></section>
       <section class="section"><div class="section-head"><h2 class="section-title">正在发生</h2></div><div class="activity-grid">${state.activities.slice(0, 2).map(activityCard).join("")}</div></section>
     </div>`;
@@ -287,6 +318,13 @@
     });
   }
 
+  function renderMonthly() {
+    const picks = state.monthlyPicks.map(workById).filter(Boolean);
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">编辑推荐与读者选择</p><h1 class="page-title">月度优秀作品</h1></div><p class="page-note">每月由编辑提名，并结合阅读、评论与读者投票产生。</p></header>
+      <div class="monthly-stage">${picks.map((work, index) => `<article class="monthly-card"><span class="monthly-rank">${String(index + 1).padStart(2, "0")}</span><div><span class="work-category">${escapeHtml(work.category)}</span><h2>${escapeHtml(work.title)}</h2><p>${escapeHtml(work.excerpt)}</p><small>${escapeHtml(work.author)} · ${work.likes} 次喜欢</small><button class="link-button" type="button" data-work="${work.id}">阅读作品</button></div></article>`).join("")}</div>
+    </div>`;
+  }
+
   function renderRanking() {
     const ranked = [...state.works].sort((a, b) => b.likes - a.likes);
     app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">读者选择</p><h1 class="page-title">排行榜</h1></div><p class="page-note">按喜欢与阅读趋势排序，每周一更新。</p></header><ol class="rank-list" style="margin-top:28px">${ranked.map((work, index) => `<li class="rank-item"><span class="rank-number">${String(index + 1).padStart(2, "0")}</span><button class="link-button rank-title" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><span class="muted">${escapeHtml(work.author)} · ${work.likes} 喜欢</span></li>`).join("")}</ol></div>`;
@@ -304,10 +342,29 @@
     const tabs = ["概览", "作品审核", "评论管理", "私信举报", "用户管理", "月度评选", "文学活动", "公告", "Agent 审核", "安全日志"];
     app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">运营控制台</p><h1 class="page-title">管理后台</h1></div><p class="page-note">正式版必须由服务端校验管理员权限。当前预览版使用模拟审核数据。</p></header><nav class="admin-tabs">${tabs.map((tab) => `<button class="${adminTab === tab ? "is-active" : ""}" type="button" data-admin-tab="${tab}">${tab}</button>`).join("")}</nav><section id="admin-content">${adminContent()}</section></div>`;
     document.querySelectorAll("[data-admin-tab]").forEach((button) => button.addEventListener("click", () => { adminTab = button.dataset.adminTab; renderAdmin(); }));
+    bindAdminActions();
+  }
+
+  function bindAdminActions() {
+    document.querySelector("#admin-ann-create")?.addEventListener("click", () => {
+      const title = document.querySelector("#admin-ann-title").value.trim();
+      const content = document.querySelector("#admin-ann-content").value.trim();
+      if (!title || !content) return showToast("请填写公告标题和内容");
+      state.announcements.unshift({ id: `ann${Date.now()}`, title, content, status: "published", at: "刚刚" });
+      save(); renderAdmin(); showToast("公告已发布");
+    });
+    document.querySelectorAll("[data-ann-toggle]").forEach((button) => button.addEventListener("click", () => {
+      const item = state.announcements.find((announcement) => announcement.id === button.dataset.annToggle);
+      if (!item) return;
+      item.status = item.status === "published" ? "archived" : "published";
+      save(); renderAdmin(); showToast(item.status === "published" ? "公告已发布" : "公告已撤回");
+    }));
   }
 
   function adminContent() {
     if (adminTab === "概览") return `<div class="admin-grid"><div class="metric"><strong>${state.works.length}</strong><span>作品总数</span></div><div class="metric"><strong>2</strong><span>待人工审核</span></div><div class="metric"><strong>1</strong><span>私信举报</span></div></div><ul class="admin-list"><li class="admin-row"><span>《潮汐来过的房间》</span><span class="muted">Agent 建议：允许 · LOW</span></li><li class="admin-row"><span>一条争议评论</span><span class="muted">待人工确认 · MEDIUM</span></li></ul>`;
+    if (adminTab === "公告") return `<div class="admin-announcement"><div class="field"><label>公告标题</label><input class="input" id="admin-ann-title" maxlength="80" placeholder="例如：十月共读会开始报名"></div><div class="field"><label>公告内容</label><textarea class="textarea" id="admin-ann-content" maxlength="1000" placeholder="填写需要告知全体用户的简短内容"></textarea></div><button class="button button-primary" type="button" id="admin-ann-create">发布公告</button></div><ul class="admin-list">${state.announcements.length ? state.announcements.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.title)}</strong><em class="admin-note">${escapeHtml(item.status === "published" ? "已发布" : "已归档")} · ${escapeHtml(item.content)}</em></span><button class="button button-small ${item.status === "published" ? "button-quiet" : "button-primary"}" type="button" data-ann-toggle="${item.id}">${item.status === "published" ? "撤回" : "发布"}</button></li>`).join("") : '<li class="empty">暂无公告</li>'}</ul>`;
+    if (adminTab === "月度评选") return `<div class="panel" style="padding:24px"><h2 class="section-title">本月提名</h2><p class="muted">当前提名作品已同步到首页和“月度优秀作品”页面。</p><ul class="admin-list">${state.monthlyPicks.map((id) => { const work = workById(id); return work ? `<li class="admin-row"><span>${escapeHtml(work.title)}</span><span class="muted">${escapeHtml(work.author)}</span></li>` : ""; }).join("")}</ul></div>`;
     if (adminTab === "Agent 审核") return `<div class="panel" style="padding:24px"><h2 class="section-title">审核状态</h2><p>当前 Agent 为 PASSIVE。普通私信不会主动扫描；只有举报、公开作品和评论进入审核队列。</p><p class="muted">模型只输出结构化分析，最终动作由确定性 PolicyEngine 和管理员确认。</p></div>`;
     if (adminTab === "安全日志") return `<ul class="admin-list"><li class="admin-row"><span>审核任务创建</span><span class="muted">刚刚</span></li><li class="admin-row"><span>管理者处理举报</span><span class="muted">保留处理结果，不修改原始消息</span></li></ul>`;
     return `<div class="panel" style="padding:24px"><h2 class="section-title">${escapeHtml(adminTab)}</h2><p class="muted">这里已保留管理入口。正式版本接入服务端权限、审计和审核 API 后启用。</p></div>`;
@@ -343,6 +400,7 @@
     if (route === "authors") return renderAuthors();
     if (route.startsWith("author/")) return renderAuthor(route.split("/")[1]);
     if (route === "messages") return renderMessages();
+    if (route === "monthly") return renderMonthly();
     if (route === "ranking") return renderRanking();
     if (route === "activities") return renderActivities();
     if (route === "admin") return renderAdmin();
@@ -379,15 +437,23 @@
       if (index >= 0) state.followed.splice(index, 1); else state.followed.push(authorId);
       save(); return renderAuthor(authorId);
     }
+    if (target.matches("[data-theme-choice]")) {
+      applyTheme(target.dataset.themeChoice);
+      closeModal();
+      render();
+      return showToast("主题已切换");
+    }
     if (target.matches("[data-activity]")) return openModal("活动详情", `<h2 id="modal-title">${escapeHtml(byId(target.dataset.activity, state.activities).title)}</h2><p>${escapeHtml(byId(target.dataset.activity, state.activities).desc)}</p><p class="muted">报名与签到将在正式版本接入。</p>`);
     if (target.matches("[data-close-modal]")) return closeModal();
   });
 
   document.querySelector("#publish-button").addEventListener("click", openPublish);
+  document.querySelector("#theme-button").addEventListener("click", openThemeChooser);
   document.querySelector("#notification-button").addEventListener("click", renderNotifications);
   document.querySelector("#user-button").addEventListener("click", () => openModal("个人设置", "<p>当前为独立预览版，使用浏览器本地数据保存你的投稿、评论、私信和拉黑设置。</p><p class='muted'>正式版本将接入账号、服务端权限与审核记录。</p>"));
   modalLayer.addEventListener("click", (event) => { if (event.target === modalLayer) closeModal(); });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !modalLayer.hidden) closeModal(); });
   window.addEventListener("hashchange", () => { route = location.hash.replace(/^#\/?/, "") || "home"; render(); });
+  applyTheme(localStorage.getItem(THEME_KEY) || "qingli");
   render();
 })();

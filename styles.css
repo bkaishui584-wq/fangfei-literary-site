@@ -13,6 +13,16 @@
   --shadow: 0 18px 50px rgba(21, 33, 38, .12);
   --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, serif;
   --sans: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-sans: var(--sans);
+  --text: var(--ink);
+  --text-muted: var(--ink-soft);
+  --text-dim: rgba(21, 33, 38, .62);
+  --ink-1: var(--paper-light);
+  --grad-primary: linear-gradient(135deg, var(--jade-dark), var(--seal));
+  --mint: var(--jade);
+  --mint-soft: rgba(102, 136, 124, .16);
+  --glass-border: var(--line-strong);
+  --glass-shadow: var(--shadow);
 }
 
 * { box-sizing: border-box; }
@@ -214,6 +224,7 @@ main { min-height: 72vh; }
 .muted { color: var(--ink-soft); }
 
 .site-foot {
+  position: relative; z-index: 1;
   display: flex; justify-content: space-between; gap: 20px; padding: 34px clamp(18px, 4vw, 58px);
   border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 13px;
 }
@@ -260,4 +271,79 @@ main { min-height: 72vh; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+}
+
+/* ProjectHub framework pieces reused for the literary experience. */
+#app { position: relative; z-index: 1; }
+.theme-atmosphere {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  opacity: .18; background-image: var(--theme-image); background-size: cover; background-position: center;
+  filter: saturate(.78);
+  animation: theme-breathe 12s ease-in-out infinite alternate;
+}
+@keyframes theme-breathe { from { opacity: .12; transform: scale(1); } to { opacity: .24; transform: scale(1.035); } }
+html[data-theme="qingli"] { --jade: #66887c; --jade-dark: #3f665a; --seal: #a84336; }
+html[data-theme="starry"] { --jade: #6d7ea8; --jade-dark: #445877; --seal: #9c5666; }
+html[data-theme="deepsea"] { --jade: #547a82; --jade-dark: #315b63; --seal: #8e5c55; }
+html[data-theme="sky"] { --jade: #668c9a; --jade-dark: #416d7a; --seal: #a05b4a; }
+html[data-theme="flower"] { --jade: #7f8f72; --jade-dark: #5c6f52; --seal: #ad5d62; }
+html[data-theme="dragon"] { --jade: #7a765e; --jade-dark: #56533e; --seal: #9b4e3d; }
+
+.announcement-strip {
+  display: flex; align-items: baseline; gap: 14px; margin-bottom: 24px; padding: 13px 16px;
+  border-left: 3px solid var(--seal); background: rgba(255,255,255,.48);
+}
+.announcement-strip strong { color: var(--seal); font-family: var(--serif); }
+.announcement-strip span { color: var(--ink-soft); }
+
+.monthly-ribbon { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.monthly-ribbon article { display: grid; grid-template-columns: 36px 1fr; align-items: baseline; gap: 4px 12px; padding: 18px; border: 1px solid var(--line); background: rgba(255,255,255,.34); }
+.monthly-ribbon article > span { grid-row: span 2; color: var(--seal); font-family: var(--serif); font-size: 25px; }
+.monthly-ribbon small { color: var(--ink-soft); }
+.monthly-stage { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 18px; margin-top: 28px; }
+.monthly-card { position: relative; min-height: 330px; padding: 28px; border: 1px solid var(--line-strong); background: rgba(255,255,255,.38); }
+.monthly-card:nth-child(1) { transform: translateY(-12px); background: rgba(255,255,255,.62); }
+.monthly-rank { color: var(--seal); font-family: var(--serif); font-size: 36px; }
+.monthly-card h2 { margin: 10px 0; font-family: var(--serif); font-size: 25px; }
+.monthly-card p { color: var(--ink-soft); }
+
+.theme-options { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+.theme-option { display: grid; grid-template-columns: 76px 1fr; gap: 12px; align-items: center; padding: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.32); cursor: pointer; text-align: left; }
+.theme-option img { width: 76px; height: 58px; object-fit: cover; }
+.theme-option span { display: grid; gap: 4px; }
+.theme-option small { color: var(--ink-soft); line-height: 1.45; }
+.theme-option.is-selected { border-color: var(--seal); box-shadow: inset 0 0 0 1px var(--seal); }
+.admin-note { display: block; margin-top: 4px; color: var(--ink-soft); font-size: 12px; font-style: normal; }
+
+.fangfei-pet {
+  position: fixed; right: max(18px, env(safe-area-inset-right)); bottom: calc(92px + env(safe-area-inset-bottom));
+  z-index: 18; width: clamp(112px, 12vw, 156px); cursor: grab; touch-action: none; user-select: none;
+  filter: drop-shadow(0 16px 24px rgba(21,33,38,.24)); transition: transform .24s ease, filter .24s ease;
+}
+.fangfei-pet img { display: block; width: 100%; height: auto; pointer-events: none; }
+.fangfei-pet.is-dragging { cursor: grabbing; transition: none; }
+.fangfei-pet[data-state="hover"] { transform: translateY(-6px) scale(1.035); }
+.fangfei-pet[data-state="click"] { animation: pet-click .72s cubic-bezier(.22,.86,.25,1) both; }
+.fangfei-pet[data-state="success"] { animation: pet-success 1s ease both; }
+.fangfei-pet[data-state="loading"], .fangfei-pet[data-state="music"] { animation: pet-music 2.4s ease-in-out infinite; }
+.fangfei-pet[data-state="sleep"] { animation: pet-sleep 1.8s ease-in-out both; }
+.pet-bubble {
+  position: absolute; right: 68%; bottom: 82%; width: max-content; max-width: 205px; padding: 9px 12px;
+  border: 1px solid var(--line-strong); border-radius: 13px 13px 4px 13px; color: var(--ink);
+  background: var(--paper-light); box-shadow: var(--shadow); font-size: 12px; line-height: 1.5;
+}
+@keyframes pet-click { 50% { transform: translateY(-8px) rotate(-3deg) scale(1.04); } }
+@keyframes pet-success { 50% { transform: translateY(-10px) scale(1.06); } }
+@keyframes pet-music { 50% { transform: translateY(-5px) rotate(2deg); } }
+@keyframes pet-sleep { 50% { transform: translateY(6px) rotate(-2deg); } }
+
+@media (max-width: 680px) {
+  .monthly-ribbon, .monthly-stage, .theme-options { grid-template-columns: 1fr; }
+  .monthly-card:nth-child(1) { transform: none; }
+  .fangfei-pet { right: 8px; bottom: 112px; width: 94px; }
+  .pet-bubble { right: 58%; max-width: 155px; font-size: 11px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-atmosphere, .fangfei-pet { animation: none !important; }
 }
