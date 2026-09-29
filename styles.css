@@ -506,3 +506,97 @@ html, body { overflow-x: hidden; }
 .auth-tabs { display: flex; gap: 6px; margin: 8px 0 18px; border-bottom: 1px solid var(--line); }
 .auth-tabs button { padding: 9px 13px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--ink-soft); cursor: pointer; }
 .auth-tabs button.is-active { color: var(--seal); border-color: var(--seal); }
+
+/* V2.1 unified modal, profile, submission and admin surfaces */
+.modal { display: flex; flex-direction: column; width: min(760px, 100%); max-height: min(86vh, 820px); padding: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; box-shadow: 0 26px 70px rgba(21,33,38,.24); }
+.modal-head { padding: 25px 30px 18px; border-bottom: 1px solid var(--line); }
+.modal-head h2 { margin: 7px 0 0; font-family: var(--serif); font-size: 28px; }
+.modal-body { min-height: 0; padding: 24px 30px; overflow: auto; overscroll-behavior: contain; }
+.modal-footer { flex: 0 0 auto; padding: 16px 30px 22px; border-top: 1px solid var(--line); background: rgba(255,255,255,.24); }
+.modal-footer .modal-actions { margin-top: 0; }
+.modal-close { z-index: 2; display: grid; place-items: center; color: var(--ink-soft); background: rgba(255,255,255,.52); line-height: 1; }
+.modal-close:hover { color: #fff; background: var(--seal); }
+
+.form-grid, .admin-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.choice-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.choice-grid label { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); background: rgba(255,255,255,.3); font-size: 12px; }
+
+.profile-page { padding-bottom: 50px; }
+.profile-hero { position: relative; display: flex; justify-content: space-between; align-items: flex-end; gap: 28px; min-height: 260px; margin-top: 26px; padding: 34px; overflow: hidden; border: 1px solid var(--line-strong); background: linear-gradient(120deg, rgba(245,242,234,.94), rgba(102,136,124,.23)), var(--profile-cover, linear-gradient(135deg, var(--jade), var(--gold))); background-position: center; background-size: cover; }
+.profile-hero::after { content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none; background: linear-gradient(90deg, rgba(245,242,234,.9), rgba(245,242,234,.42)); }
+.profile-hero-main, .profile-stats { position: relative; z-index: 1; }
+.profile-hero-main { display: flex; align-items: center; gap: 20px; min-width: 0; }
+.profile-avatar { flex: 0 0 auto; width: 92px; height: 92px; border-radius: 50%; font-size: 34px; box-shadow: 0 12px 30px rgba(21,33,38,.18); }
+.profile-hero h1 { margin: 6px 0; font-family: var(--serif); font-size: clamp(30px, 5vw, 50px); line-height: 1.1; }
+.profile-hero p { max-width: 560px; margin: 0; color: var(--ink-soft); }
+.profile-hero small { display: block; margin-top: 13px; color: var(--ink-soft); }
+.profile-stats { display: grid; grid-template-columns: repeat(2, minmax(88px, 1fr)); gap: 9px; }
+.profile-stats span { padding: 12px 14px; border: 1px solid var(--line); background: rgba(255,255,255,.48); color: var(--ink-soft); font-size: 12px; }
+.profile-stats strong { display: block; color: var(--ink); font-family: var(--serif); font-size: 25px; line-height: 1.15; }
+.profile-tabs { display: flex; gap: 4px; margin: 22px 0; overflow-x: auto; border-bottom: 1px solid var(--line-strong); }
+.profile-tabs button { flex: 0 0 auto; min-height: 44px; padding: 9px 15px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--ink-soft); cursor: pointer; }
+.profile-tabs button:hover, .profile-tabs button.is-active { color: var(--seal); border-color: var(--seal); }
+.profile-section { padding: 24px; border: 1px solid var(--line); background: rgba(255,255,255,.28); }
+.profile-status-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 18px 0 22px; }
+.profile-status-summary span { padding: 13px 15px; border: 1px solid var(--line); background: rgba(255,255,255,.34); color: var(--ink-soft); font-size: 12px; }
+.profile-status-summary strong { display: block; color: var(--seal); font-family: var(--serif); font-size: 24px; line-height: 1.15; }
+.profile-work-list { display: grid; gap: 10px; }
+.profile-work-row { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 16px; border: 1px solid var(--line); background: rgba(255,255,255,.3); }
+.profile-work-row h3 { margin: 7px 0 4px; font-family: var(--serif); font-size: 20px; }
+.profile-work-row small { color: var(--ink-soft); }
+.profile-work-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 7px; }
+.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.setting-card { display: grid; gap: 5px; min-height: 92px; padding: 17px; border: 1px solid var(--line); background: rgba(255,255,255,.3); cursor: pointer; text-align: left; }
+.setting-card:hover { border-color: var(--seal); background: rgba(255,255,255,.52); }
+.setting-card strong { font-family: var(--serif); font-size: 19px; }
+.setting-card small { color: var(--ink-soft); }
+.setting-card.is-danger strong { color: var(--seal); }
+
+.publish-form { display: grid; gap: 22px; }
+.publish-section { display: grid; gap: 10px; padding: 0 0 22px; border-bottom: 1px solid var(--line); }
+.publish-section:last-child { padding-bottom: 0; border-bottom: 0; }
+.publish-section-head { display: flex; align-items: flex-start; gap: 13px; }
+.publish-section-head > span { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; color: #fff; background: var(--jade-dark); font-family: var(--serif); font-size: 18px; }
+.publish-section-head h3 { margin: 0; font-family: var(--serif); font-size: 22px; }
+.publish-section-head p { margin: 3px 0 0; color: var(--ink-soft); font-size: 12px; }
+.publish-body { min-height: 330px; font-family: var(--serif); font-size: 17px; line-height: 1.95; }
+.publish-status { display: flex; justify-content: space-between; gap: 12px; color: var(--ink-soft); font-size: 12px; }
+.publish-actions { justify-content: space-between; }
+.publish-actions .button { min-width: 132px; }
+
+.admin-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.admin-form, .award-form { display: grid; gap: 12px; margin: 18px 0 26px; padding: 18px; border: 1px solid var(--line); background: rgba(255,255,255,.28); }
+.admin-form h3 { margin: 0; font-family: var(--serif); font-size: 21px; }
+.select-small { width: auto; min-width: 106px; padding: 7px 9px; }
+.monthly-group { margin-top: 46px; }
+.monthly-group:first-of-type { margin-top: 28px; }
+.monthly-byline { display: block; margin-top: 8px; color: var(--ink-soft); }
+.ranking-controls { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin: 24px 0; }
+.rank-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
+.rank-tabs button { min-height: 38px; padding: 7px 13px; border: 1px solid var(--line); background: rgba(255,255,255,.28); cursor: pointer; }
+.rank-tabs button:hover, .rank-tabs button.is-active { color: #fff; background: var(--jade-dark); border-color: var(--jade-dark); }
+.rank-subtabs { margin-bottom: 16px; }
+
+@media (max-width: 860px) {
+  .profile-hero { align-items: flex-start; flex-direction: column; }
+  .profile-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); width: 100%; }
+}
+@media (max-width: 680px) {
+  .modal { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); border-radius: 12px; }
+  .modal-head, .modal-body, .modal-footer { padding-left: 18px; padding-right: 18px; }
+  .modal-head { padding-top: 22px; }
+  .form-grid, .admin-form-grid, .settings-grid, .profile-status-summary { grid-template-columns: 1fr; }
+  .choice-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profile-hero { min-height: 0; padding: 24px 20px; }
+  .profile-hero-main { align-items: flex-start; flex-direction: column; }
+  .profile-avatar { width: 76px; height: 76px; }
+  .profile-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profile-section { padding: 18px 14px; }
+  .profile-work-row, .admin-row { align-items: flex-start; flex-direction: column; }
+  .profile-work-actions, .admin-actions { justify-content: flex-start; }
+  .publish-body { min-height: 260px; }
+  .publish-actions .button { flex: 1 1 calc(50% - 5px); min-width: 0; }
+  .ranking-controls { align-items: stretch; flex-direction: column; }
+  .rank-tabs { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 4px; }
+  .rank-tabs button { flex: 0 0 auto; }
+}

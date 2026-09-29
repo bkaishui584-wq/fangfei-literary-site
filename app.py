@@ -32,6 +32,8 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 ADMIN_USERNAME_RE = re.compile(r"^[\w\u4e00-\u9fff]{1,32}$", re.UNICODE)
 PUBLIC_ROOTS = {"assets", "css", "images", "js", "vendor"}
 PUBLIC_FILES = {"app.js", "styles.css", "pet.js", "favicon.ico"}
+WORK_CATEGORIES = {"小说", "诗歌", "散文", "随笔", "剧本", "科幻", "杂文", "其他"}
+PROFILE_COVER_THEMES = {"starry", "deepsea", "sky", "flower", "dragon", "qingli", ""}
 
 app = Flask(__name__)
 app.config.update(
@@ -54,8 +56,32 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL DEFAULT 'reader' CHECK (role IN ('reader', 'admin')),
   bio TEXT NOT NULL DEFAULT '',
   awards INTEGER,
+  account_status TEXT NOT NULL DEFAULT 'active',
+  avatar TEXT NOT NULL DEFAULT '',
+  cover_theme TEXT NOT NULL DEFAULT '',
+  literary_preferences TEXT NOT NULL DEFAULT '',
+  genres_json TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS admin_roles (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  level TEXT NOT NULL CHECK (level IN ('super', 'senior')),
+  appointed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  appointed_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_roles_level ON admin_roles(level);
+
+CREATE TABLE IF NOT EXISTS admin_transfers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  old_admin_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  new_admin_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_transfers_created ON admin_transfers(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
@@ -77,6 +103,11 @@ CREATE TABLE IF NOT EXISTS works (
   body_json TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'published',
   review_note TEXT NOT NULL DEFAULT '',
+  is_public INTEGER NOT NULL DEFAULT 1,
+  allow_comments INTEGER NOT NULL DEFAULT 1,
+  allow_favorites INTEGER NOT NULL DEFAULT 1,
+  original_confirmed INTEGER NOT NULL DEFAULT 0,
+  rights_confirmed INTEGER NOT NULL DEFAULT 0,
   views INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -84,6 +115,13 @@ CREATE TABLE IF NOT EXISTS works (
 );
 CREATE INDEX IF NOT EXISTS idx_works_author ON works(author_id);
 CREATE INDEX IF NOT EXISTS idx_works_status_created ON works(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS work_views (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  viewed_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_work_views_period ON work_views(work_id, viewed_at);
 
 CREATE TABLE IF NOT EXISTS likes (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -158,6 +196,20 @@ CREATE TABLE IF NOT EXISTS monthly_picks (
   reason TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (month, work_id)
 );
+
+CREATE TABLE IF NOT EXISTS monthly_awards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  category TEXT NOT NULL DEFAULT '',
+  month TEXT NOT NULL,
+  rank INTEGER NOT NULL DEFAULT 1,
+  reason TEXT NOT NULL DEFAULT '',
+  selected_at INTEGER NOT NULL,
+  selected_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active'
+);
+CREATE INDEX IF NOT EXISTS idx_monthly_awards_month ON monthly_awards(month, status, rank);
 
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,15 +316,100 @@ def close_db(_error: BaseException | None) -> None:
         conn.close()
 
 
+def migrate_columns(conn: sqlite3.Connection) -> None:
+    migrations = {
+        "users": {
+            "account_status": "TEXT NOT NULL DEFAULT 'active'",
+            "avatar": "TEXT NOT NULL DEFAULT ''",
+            "cover_theme": "TEXT NOT NULL DEFAULT ''",
+            "literary_preferences": "TEXT NOT NULL DEFAULT ''",
+            "genres_json": "TEXT NOT NULL DEFAULT '[]'",
+        },
+        "works": {
+            "is_public": "INTEGER NOT NULL DEFAULT 1",
+            "allow_comments": "INTEGER NOT NULL DEFAULT 1",
+            "allow_favorites": "INTEGER NOT NULL DEFAULT 1",
+            "original_confirmed": "INTEGER NOT NULL DEFAULT 0",
+            "rights_confirmed": "INTEGER NOT NULL DEFAULT 0",
+        },
+    }
+    for table, columns in migrations.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, ddl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def sync_system_data() -> None:
+    conn = sqlite3.connect(DATABASE_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        has_super = conn.execute("SELECT 1 FROM admin_roles WHERE level = 'super' LIMIT 1").fetchone() is not None
+        senior_count = conn.execute("SELECT COUNT(*) AS count FROM admin_roles WHERE level = 'senior'").fetchone()["count"]
+        for row in conn.execute("SELECT id, created_at FROM users WHERE role = 'admin' ORDER BY id ASC").fetchall():
+            existing = conn.execute("SELECT level FROM admin_roles WHERE user_id = ?", (row["id"],)).fetchone()
+            if existing:
+                if not has_super and existing["level"] == "senior":
+                    conn.execute("UPDATE admin_roles SET level = 'super', updated_at = ? WHERE user_id = ?", (now_ms(), row["id"]))
+                    has_super = True
+                continue
+            if not has_super:
+                conn.execute(
+                    "INSERT INTO admin_roles (user_id, level, appointed_at, updated_at) VALUES (?, 'super', ?, ?)",
+                    (row["id"], row["created_at"], now_ms()),
+                )
+                has_super = True
+            elif senior_count < 2:
+                conn.execute(
+                    "INSERT INTO admin_roles (user_id, level, appointed_at, updated_at) VALUES (?, 'senior', ?, ?)",
+                    (row["id"], row["created_at"], now_ms()),
+                )
+                senior_count += 1
+            else:
+                conn.execute("UPDATE users SET role = 'reader' WHERE id = ?", (row["id"],))
+        super_rows = conn.execute(
+            "SELECT user_id FROM admin_roles WHERE level = 'super' ORDER BY appointed_at ASC, user_id ASC"
+        ).fetchall()
+        for row in super_rows[1:]:
+            conn.execute("DELETE FROM admin_roles WHERE user_id = ?", (row["user_id"],))
+            conn.execute("UPDATE users SET role = 'reader' WHERE id = ?", (row["user_id"],))
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["user_id"],))
+        senior_rows = conn.execute(
+            "SELECT user_id FROM admin_roles WHERE level = 'senior' ORDER BY appointed_at ASC, user_id ASC"
+        ).fetchall()
+        for row in senior_rows[2:]:
+            conn.execute("DELETE FROM admin_roles WHERE user_id = ?", (row["user_id"],))
+            conn.execute("UPDATE users SET role = 'reader' WHERE id = ?", (row["user_id"],))
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["user_id"],))
+        conn.execute(
+            """
+            INSERT INTO monthly_awards (work_id, author_id, category, month, rank, reason, selected_at, selected_by, status)
+            SELECT mp.work_id, w.author_id, w.category, mp.month, mp.rank, mp.reason,
+                   COALESCE(w.published_at, w.created_at), NULL, 'active'
+            FROM monthly_picks mp
+            JOIN works w ON w.id = mp.work_id
+            WHERE NOT EXISTS (
+              SELECT 1 FROM monthly_awards ma
+              WHERE ma.work_id = mp.work_id AND ma.month = mp.month AND ma.status = 'active'
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DATABASE_PATH, timeout=15)
     try:
         conn.executescript(SCHEMA)
+        migrate_columns(conn)
         conn.commit()
     finally:
         conn.close()
     ensure_admin()
+    sync_system_data()
 
 
 def ensure_admin() -> None:
@@ -381,13 +518,26 @@ def user_row(user_id: int | None):
     return get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
 
 
+def row_value(row, key, default=None):
+    return row[key] if key in row.keys() else default
+
+
 def public_user(row) -> dict:
+    try:
+        genres = json.loads(row_value(row, "genres_json", "[]") or "[]")
+    except (TypeError, ValueError):
+        genres = []
     return {
         "id": f"u{row['id']}",
         "name": row["display_name"],
         "role": row["role"],
         "bio": row["bio"] or "",
         "awards": row["awards"],
+        "avatar": row_value(row, "avatar", "") or "",
+        "coverTheme": row_value(row, "cover_theme", "") or "",
+        "preferences": row_value(row, "literary_preferences", "") or "",
+        "genres": genres if isinstance(genres, list) else [],
+        "joinedAt": iso_time(row["created_at"]),
     }
 
 
@@ -409,7 +559,7 @@ def current_user_row():
         g.session = None
         return None
     user = get_db().execute("SELECT * FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-    if not user:
+    if not user or row_value(user, "account_status", "active") != "active":
         g.user = None
         g.session = None
         return None
@@ -480,8 +630,34 @@ def require_admin(view):
         user = current_user_row()
         if not user:
             return json_error("请先登录", 401)
+        if user["role"] != "admin" or not admin_level(user):
+            return json_error("权限不足", 403)
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def admin_level(user) -> str:
+    if not user or user["role"] != "admin":
+        return ""
+    row = get_db().execute("SELECT level FROM admin_roles WHERE user_id = ?", (user["id"],)).fetchone()
+    return row["level"] if row else ""
+
+
+def is_super_admin(user) -> bool:
+    return admin_level(user) == "super"
+
+
+def require_super_admin(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user = current_user_row()
+        if not user:
+            return json_error("请先登录", 401)
         if user["role"] != "admin":
             return json_error("权限不足", 403)
+        if not is_super_admin(user):
+            return json_error("只有超级管理员可以执行此操作", 403)
         return view(*args, **kwargs)
 
     return wrapped
@@ -532,8 +708,120 @@ def get_work(work_id: int, user_row_value=None):
     """
     params: list[object] = [work_id]
     if not is_admin:
-        sql += " AND w.status = 'published'"
+        if user:
+            sql += " AND ((w.status = 'published' AND w.is_public = 1) OR w.author_id = ?)"
+            params.append(user["id"])
+        else:
+            sql += " AND w.status = 'published' AND w.is_public = 1"
     return get_db().execute(sql, params).fetchone()
+
+
+def _ranking_period_start(period: str) -> int:
+    now = datetime.now(timezone.utc)
+    if period == "month":
+        value = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    elif period == "quarter":
+        value = datetime(now.year, ((now.month - 1) // 3) * 3 + 1, 1, tzinfo=timezone.utc)
+    elif period == "year":
+        value = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+    else:
+        return 0
+    return int(value.timestamp() * 1000)
+
+
+def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) -> dict:
+    periods = {name: _ranking_period_start(name) for name in ("month", "quarter", "year", "all")}
+    author_names = {item.get("id"): item.get("name", "") for item in (authors or [])}
+    rankings: dict[str, dict] = {}
+    for period, start in periods.items():
+        work_rows = db.execute(
+            """
+            SELECT w.id, w.author_id, w.title, w.category, w.excerpt, w.views, w.body_json,
+                   w.published_at, w.created_at, u.display_name AS author_name
+            FROM works w JOIN users u ON u.id = w.author_id
+            WHERE w.status = 'published' AND w.is_public = 1
+            ORDER BY COALESCE(w.published_at, w.created_at) DESC
+            """
+        ).fetchall()
+        work_items = []
+        author_stats: dict[str, dict] = {}
+        for row in work_rows:
+            work_id = row["id"]
+            if start:
+                views = db.execute(
+                    "SELECT COUNT(*) AS count FROM work_views WHERE work_id = ? AND viewed_at >= ?",
+                    (work_id, start),
+                ).fetchone()["count"]
+                likes = db.execute(
+                    "SELECT COUNT(*) AS count FROM likes WHERE work_id = ? AND created_at >= ?",
+                    (work_id, start),
+                ).fetchone()["count"]
+                favorites = db.execute(
+                    "SELECT COUNT(*) AS count FROM favorites WHERE work_id = ? AND created_at >= ?",
+                    (work_id, start),
+                ).fetchone()["count"]
+                comments = db.execute(
+                    "SELECT COUNT(*) AS count FROM comments WHERE work_id = ? AND deleted_at IS NULL AND created_at >= ?",
+                    (work_id, start),
+                ).fetchone()["count"]
+            else:
+                views = int(row["views"] or 0)
+                likes = db.execute("SELECT COUNT(*) AS count FROM likes WHERE work_id = ?", (work_id,)).fetchone()["count"]
+                favorites = db.execute("SELECT COUNT(*) AS count FROM favorites WHERE work_id = ?", (work_id,)).fetchone()["count"]
+                comments = db.execute(
+                    "SELECT COUNT(*) AS count FROM comments WHERE work_id = ? AND deleted_at IS NULL",
+                    (work_id,),
+                ).fetchone()["count"]
+            score = views + likes * 8 + favorites * 10 + comments * 4
+            work_items.append(
+                {
+                    "id": f"w{work_id}",
+                    "title": row["title"],
+                    "authorId": f"u{row['author_id']}",
+                    "author": row["author_name"],
+                    "category": row["category"],
+                    "excerpt": row["excerpt"],
+                    "publishedAt": row["published_at"] or row["created_at"],
+                    "views": views,
+                    "likes": likes,
+                    "favorites": favorites,
+                    "comments": comments,
+                    "score": score,
+                }
+            )
+            author_id = f"u{row['author_id']}"
+            stats = author_stats.setdefault(
+                author_id,
+                {"id": author_id, "name": row["author_name"] or author_names.get(author_id, ""), "works": 0, "awards": 0, "words": 0, "popularity": 0},
+            )
+            stats["popularity"] += score
+            published_at = int(row["published_at"] or row["created_at"] or 0)
+            if not start or published_at >= start:
+                stats["works"] += 1
+                try:
+                    body = json.loads(row["body_json"] or "[]")
+                except (TypeError, ValueError):
+                    body = []
+                stats["words"] += len(re.sub(r"\s+", "", "".join(str(part) for part in body if part)))
+
+        award_sql = "SELECT author_id, COUNT(*) AS count FROM monthly_awards WHERE status = 'active'"
+        award_params: list[object] = []
+        if start:
+            award_sql += " AND selected_at >= ?"
+            award_params.append(start)
+        award_sql += " GROUP BY author_id"
+        for row in db.execute(award_sql, award_params).fetchall():
+            author_id = f"u{row['author_id']}"
+            stats = author_stats.setdefault(
+                author_id,
+                {"id": author_id, "name": author_names.get(author_id, ""), "works": 0, "awards": 0, "words": 0, "popularity": 0},
+            )
+            stats["awards"] = int(row["count"])
+        rankings[period] = {
+            "works": sorted(work_items, key=lambda item: (item["score"], item["views"], item["likes"]), reverse=True),
+            "authors": [item for item in author_stats.values() if item["works"] or item["awards"] or item["words"] or item["popularity"]],
+        }
+    return rankings
 
 
 def build_state(user) -> dict:
@@ -544,12 +832,17 @@ def build_state(user) -> dict:
     works_sql = """
       SELECT w.*, u.display_name AS author_name,
         (SELECT COUNT(*) FROM likes l WHERE l.work_id = w.id) AS likes_count,
-        (SELECT COUNT(*) FROM favorites f WHERE f.work_id = w.id) AS favorites_count
+        (SELECT COUNT(*) FROM favorites f WHERE f.work_id = w.id) AS favorites_count,
+        (SELECT COUNT(*) FROM comments c WHERE c.work_id = w.id AND c.deleted_at IS NULL) AS comments_count
       FROM works w JOIN users u ON u.id = w.author_id
     """
     params: list[object] = []
     if not is_admin:
-        works_sql += " WHERE w.status = 'published'"
+        if user_id:
+            works_sql += " WHERE ((w.status = 'published' AND w.is_public = 1) OR w.author_id = ?)"
+            params.append(user_id)
+        else:
+            works_sql += " WHERE w.status = 'published' AND w.is_public = 1"
     works_sql += " ORDER BY COALESCE(w.published_at, w.created_at) DESC"
     works = []
     for row in db.execute(works_sql, params).fetchall():
@@ -583,26 +876,45 @@ def build_state(user) -> dict:
                 "likes": row["likes_count"],
                 "views": row["views"],
                 "favorites": row["favorites_count"],
+                "commentsCount": row["comments_count"],
                 "excerpt": row["excerpt"],
                 "body": json.loads(row["body_json"] or "[]"),
                 "comments": comments,
                 "createdAt": row["published_at"] or row["created_at"],
+                "publishedAt": row["published_at"],
                 "updatedAt": row["updated_at"],
                 "createdBy": f"u{row['author_id']}",
                 "status": row["status"],
                 "reviewNote": row["review_note"],
+                "isPublic": bool(row_value(row, "is_public", 1)),
+                "allowComments": bool(row_value(row, "allow_comments", 1)),
+                "allowFavorites": bool(row_value(row, "allow_favorites", 1)),
+                "originalConfirmed": bool(row_value(row, "original_confirmed", 0)),
+                "rightsConfirmed": bool(row_value(row, "rights_confirmed", 0)),
             }
         )
 
     authors_sql = """
       SELECT u.*,
-        (SELECT COUNT(*) FROM works w WHERE w.author_id = u.id AND w.status = 'published') AS work_count
+        (SELECT COUNT(*) FROM works w WHERE w.author_id = u.id AND w.status = 'published') AS work_count,
+        (SELECT COUNT(*) FROM follows f WHERE f.author_id = u.id) AS follower_count,
+        (SELECT COUNT(*) FROM monthly_awards ma WHERE ma.author_id = u.id AND ma.status = 'active') AS award_count,
+        (SELECT COALESCE(SUM(w.views), 0) FROM works w WHERE w.author_id = u.id AND w.status = 'published') AS views_count
       FROM users u
     """
     if not is_admin:
         authors_sql += " WHERE EXISTS (SELECT 1 FROM works w WHERE w.author_id = u.id AND w.status = 'published')"
     authors_sql += " ORDER BY work_count DESC, u.created_at ASC"
-    authors = [public_user(row) for row in db.execute(authors_sql).fetchall()]
+    authors = []
+    for row in db.execute(authors_sql).fetchall():
+        author = public_user(row)
+        author.update({
+            "workCount": row["work_count"],
+            "followerCount": row["follower_count"],
+            "awardCount": row["award_count"],
+            "views": row["views_count"],
+        })
+        authors.append(author)
 
     activities = [
         {
@@ -631,12 +943,34 @@ def build_state(user) -> dict:
         for row in db.execute(announcement_sql).fetchall()
     ]
 
-    monthly_picks = [
-        f"w{row['work_id']}"
+    monthly_visibility = "" if is_admin else "AND w.status = 'published' AND w.is_public = 1"
+    monthly_awards = [
+        {
+            "id": f"a{row['id']}",
+            "workId": f"w{row['work_id']}",
+            "authorId": f"u{row['author_id']}",
+            "category": row["category"],
+            "month": row["month"],
+            "rank": int(row["rank"]),
+            "reason": row["reason"],
+            "selectedAt": iso_time(row["selected_at"]),
+            "selectedBy": f"u{row['selected_by']}" if row["selected_by"] else "",
+            "selectedByName": row["selected_by_name"] or "",
+            "status": row["status"],
+        }
         for row in db.execute(
-            "SELECT work_id FROM monthly_picks ORDER BY month DESC, rank ASC, work_id ASC"
+            f"""
+            SELECT ma.*, u.display_name AS selected_by_name
+            FROM monthly_awards ma
+            LEFT JOIN users u ON u.id = ma.selected_by
+            JOIN works w ON w.id = ma.work_id
+            WHERE ma.status = 'active'
+            {monthly_visibility}
+            ORDER BY ma.month DESC, ma.rank ASC, ma.id DESC
+            """
         ).fetchall()
     ]
+    monthly_picks = [row["workId"] for row in monthly_awards]
 
     followed = []
     blocked = []
@@ -647,6 +981,9 @@ def build_state(user) -> dict:
     message_settings = {"allowStrangers": True, "recallMinutes": 2, "notifications": True}
     reports = []
     audit_logs = []
+    users = []
+    admin_roles = []
+    admin_transfers = []
 
     if user_id:
         followed = [f"u{row['author_id']}" for row in db.execute("SELECT author_id FROM follows WHERE follower_id = ?", (user_id,)).fetchall()]
@@ -714,6 +1051,49 @@ def build_state(user) -> dict:
             )
 
     if is_admin:
+        user_rows = db.execute("SELECT * FROM users ORDER BY created_at ASC LIMIT 500").fetchall()
+        role_rows = db.execute("SELECT * FROM admin_roles").fetchall()
+        user_names = {f"u{row['id']}": row["display_name"] for row in user_rows}
+        admin_roles = [
+            {
+                "userId": f"u{row['user_id']}",
+                "name": user_names.get(f"u{row['user_id']}", ""),
+                "level": row["level"],
+                "appointedAt": iso_time(row["appointed_at"]),
+            }
+            for row in role_rows
+        ]
+        users = []
+        for row in user_rows:
+            item = public_user(row)
+            level = next((entry["level"] for entry in admin_roles if entry["userId"] == item["id"]), "")
+            item["adminLevel"] = level
+            item["accountStatus"] = row_value(row, "account_status", "active")
+            users.append(item)
+        admin_transfers = [
+            {
+                "id": f"t{row['id']}",
+                "oldAdminId": f"u{row['old_admin_id']}",
+                "oldName": row["old_name"] or "",
+                "newAdminId": f"u{row['new_admin_id']}",
+                "newName": row["new_name"] or "",
+                "operatorId": f"u{row['operator_id']}",
+                "operatorName": row["operator_name"] or "",
+                "reason": row["reason"],
+                "at": iso_time(row["created_at"]),
+            }
+            for row in db.execute(
+                """
+                SELECT t.*, old.display_name AS old_name, new.display_name AS new_name,
+                       operator.display_name AS operator_name
+                FROM admin_transfers t
+                LEFT JOIN users old ON old.id = t.old_admin_id
+                LEFT JOIN users new ON new.id = t.new_admin_id
+                LEFT JOIN users operator ON operator.id = t.operator_id
+                ORDER BY t.created_at DESC LIMIT 100
+                """
+            ).fetchall()
+        ]
         reports = [
             {
                 "id": f"r{row['id']}",
@@ -730,15 +1110,28 @@ def build_state(user) -> dict:
         audit_logs = [
             {
                 "id": f"l{row['id']}",
+                "actorId": f"u{row['actor_id']}" if row["actor_id"] else "",
+                "actorName": row["actor_name"] or "系统",
+                "action": row["action"],
                 "text": row["detail"] or row["action"],
                 "at": iso_time(row["created_at"]),
             }
-            for row in db.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100").fetchall()
+            for row in db.execute(
+                """
+                SELECT a.*, u.display_name AS actor_name
+                FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
+                ORDER BY a.created_at DESC LIMIT 100
+                """
+            ).fetchall()
         ]
 
+    current_user = public_user(user) if user else {"id": "", "name": "访客", "role": "guest"}
+    if user and user["role"] == "admin":
+        current_user["adminLevel"] = admin_level(user)
+
     return {
-        "schemaVersion": 4,
-        "currentUser": public_user(user) if user else {"id": "", "name": "访客", "role": "guest"},
+        "schemaVersion": 6,
+        "currentUser": current_user,
         "followed": followed,
         "blocked": blocked,
         "likedWorks": liked,
@@ -752,7 +1145,13 @@ def build_state(user) -> dict:
         "auditLogs": audit_logs,
         "messageSettings": message_settings,
         "monthlyPicks": monthly_picks,
+        "monthlyAwards": monthly_awards,
         "conversations": conversations,
+        "users": users,
+        "adminRoles": admin_roles,
+        "adminTransfers": admin_transfers,
+        "rankings": build_rankings(db, authors),
+        "rankingWeights": {"views": 1, "likes": 8, "favorites": 10, "comments": 4},
     }
 
 
@@ -890,7 +1289,7 @@ def login():
     username = clean_text(payload.get("username"), 32, required=True)
     password = str(payload.get("password") or "")
     user = get_db().execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    if not user or not check_password_hash(user["password_hash"], password):
+    if not user or row_value(user, "account_status", "active") != "active" or not check_password_hash(user["password_hash"], password):
         return json_error("用户名或密码不正确", 401)
     raw_token, csrf_token = issue_session(user["id"])
     response = json_ok(bootstrap_payload())
@@ -928,39 +1327,143 @@ def change_password():
     return json_ok(bootstrap_payload())
 
 
-@app.post("/api/works")
+@app.post("/api/profile")
 @require_auth
-def create_work():
-    if not rate_limit("create_work", 20, 3600):
-        return json_error("投稿过于频繁", 429)
+def update_profile():
     payload = request_json()
+    name = clean_text(payload.get("displayName"), 40, required=True)
+    bio = clean_text(payload.get("bio"), 300)
+    avatar = clean_text(payload.get("avatar"), 4)
+    cover_theme = clean_text(payload.get("coverTheme"), 20)
+    preferences = clean_text(payload.get("preferences"), 500)
+    genres_value = payload.get("genres") if isinstance(payload.get("genres"), list) else []
+    genres = [clean_text(item, 20) for item in genres_value if clean_text(item, 20)]
+    genres = [item for item in dict.fromkeys(genres) if item in WORK_CATEGORIES][:6]
+    if cover_theme not in PROFILE_COVER_THEMES:
+        return json_error("背景主题无效", 400)
+    get_db().execute(
+        """
+        UPDATE users SET display_name = ?, bio = ?, avatar = ?, cover_theme = ?,
+          literary_preferences = ?, genres_json = ?
+        WHERE id = ?
+        """,
+        (name, bio, avatar, cover_theme, preferences, json.dumps(genres, ensure_ascii=False), g.user["id"]),
+    )
+    audit("修改资料", "user", str(g.user["id"]), "用户更新个人资料", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+def save_work(work_id: int | None = None):
+    payload = request_json()
+    action = clean_text(payload.get("action") or "submit", 10)
+    if action not in {"draft", "submit"}:
+        return json_error("投稿操作无效", 400)
     title = clean_text(payload.get("title"), 80, required=True)
-    category = clean_text(payload.get("category"), 20, required=True)
+    category = clean_text(payload.get("category") or "其他", 20, required=True)
+    if category not in WORK_CATEGORIES:
+        return json_error("作品类型无效", 400)
     tags_value = payload.get("tags") if isinstance(payload.get("tags"), list) else []
     tags = [clean_text(tag, 20) for tag in tags_value if clean_text(tag, 20)][:10]
     body_value = payload.get("body") if isinstance(payload.get("body"), list) else []
-    body = [clean_text(paragraph, MAX_STRING_CHARS, required=True) for paragraph in body_value if clean_text(paragraph, MAX_STRING_CHARS)]
-    if not body:
-        return json_error("正文不能为空", 400)
-    excerpt = body[0][:90]
+    body = [clean_text(paragraph, MAX_STRING_CHARS) for paragraph in body_value if clean_text(paragraph, MAX_STRING_CHARS)]
+    original_confirmed = bool(payload.get("originalConfirmed"))
+    rights_confirmed = bool(payload.get("rightsConfirmed"))
+    if action == "submit":
+        if not body:
+            return json_error("提交审核前需要填写正文", 400)
+        if not original_confirmed or not rights_confirmed:
+            return json_error("提交审核前需要确认原创与展示授权", 400)
+    is_public = bool(payload.get("isPublic", True))
+    allow_comments = bool(payload.get("allowComments", True))
+    allow_favorites = bool(payload.get("allowFavorites", True))
+    excerpt = clean_text(payload.get("excerpt"), 200) or (body[0][:90] if body else "")
     timestamp = now_ms()
-    cursor = get_db().execute(
-        """
-        INSERT INTO works (author_id, title, category, tags_json, excerpt, body_json, status, created_at, updated_at, published_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'published', ?, ?, ?)
-        """,
-        (g.user["id"], title, category, json.dumps(tags, ensure_ascii=False), excerpt, json.dumps(body, ensure_ascii=False), timestamp, timestamp, timestamp),
-    )
-    audit("创建作品", "work", str(cursor.lastrowid), f"发布作品《{title}》", g.user["id"])
-    notify(g.user["id"], f"作品《{title}》已进入公开作品区。", "work", f"#/work/w{cursor.lastrowid}")
-    get_db().commit()
+    db = get_db()
+    if work_id is None:
+        if not rate_limit("create_work", 20, 3600):
+            return json_error("投稿过于频繁", 429)
+        status = "draft" if action == "draft" else "pending"
+        cursor = db.execute(
+            """
+            INSERT INTO works (
+              author_id, title, category, tags_json, excerpt, body_json, status, review_note,
+              is_public, allow_comments, allow_favorites, original_confirmed, rights_confirmed,
+              created_at, updated_at, published_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                g.user["id"], title, category, json.dumps(tags, ensure_ascii=False), excerpt,
+                json.dumps(body, ensure_ascii=False), status, int(is_public), int(allow_comments),
+                int(allow_favorites), int(original_confirmed), int(rights_confirmed),
+                timestamp, timestamp, None,
+            ),
+        )
+        work_id = cursor.lastrowid
+    else:
+        existing = db.execute("SELECT * FROM works WHERE id = ? AND author_id = ?", (work_id, g.user["id"])).fetchone()
+        if not existing:
+            return json_error("作品不存在或无权修改", 404)
+        if existing["status"] not in {"draft", "rejected"}:
+            return json_error("只有草稿或未通过作品可以修改", 409)
+        status = "draft" if action == "draft" else "pending"
+        db.execute(
+            """
+            UPDATE works SET title = ?, category = ?, tags_json = ?, excerpt = ?, body_json = ?,
+              status = ?, review_note = '', is_public = ?, allow_comments = ?, allow_favorites = ?,
+              original_confirmed = ?, rights_confirmed = ?, updated_at = ?, published_at = NULL
+            WHERE id = ? AND author_id = ?
+            """,
+            (
+                title, category, json.dumps(tags, ensure_ascii=False), excerpt,
+                json.dumps(body, ensure_ascii=False), status, int(is_public), int(allow_comments),
+                int(allow_favorites), int(original_confirmed), int(rights_confirmed), timestamp,
+                work_id, g.user["id"],
+            ),
+        )
+    action_text = "保存草稿" if action == "draft" else "提交审核"
+    audit(action_text, "work", str(work_id), f"{action_text}《{title}》", g.user["id"])
+    notify(g.user["id"], f"作品《{title}》{'已保存为草稿' if action == 'draft' else '已提交审核，等待编辑部处理'}。", "work", f"#/work/w{work_id}")
+    db.commit()
     return json_ok(bootstrap_payload())
+
+
+@app.post("/api/works")
+@require_auth
+def create_work():
+    return save_work()
+
+
+@app.post("/api/works/<int:work_id>")
+@require_auth
+def update_work(work_id: int):
+    return save_work(work_id)
+
+
+def public_work(work_id: int):
+    work = get_work(work_id)
+    if not work or work["status"] != "published" or not bool(row_value(work, "is_public", 1)):
+        return None
+    return work
+
+
+@app.post("/api/works/<int:work_id>/view")
+def record_view(work_id: int):
+    if not rate_limit(f"view:{work_id}", 1, 1800):
+        return json_ok({"ok": True})
+    work = public_work(work_id)
+    if not work:
+        return json_error("作品不存在", 404)
+    get_db().execute("UPDATE works SET views = views + 1 WHERE id = ?", (work_id,))
+    get_db().execute("INSERT INTO work_views (work_id, viewed_at) VALUES (?, ?)", (work_id, now_ms()))
+    get_db().commit()
+    return json_ok({"ok": True})
 
 
 @app.post("/api/works/<int:work_id>/like")
 @require_auth
 def toggle_like(work_id: int):
-    work = get_work(work_id)
+    work = public_work(work_id)
     if not work:
         return json_error("作品不存在", 404)
     db = get_db()
@@ -976,9 +1479,11 @@ def toggle_like(work_id: int):
 @app.post("/api/works/<int:work_id>/favorite")
 @require_auth
 def toggle_favorite(work_id: int):
-    work = get_work(work_id)
+    work = public_work(work_id)
     if not work:
         return json_error("作品不存在", 404)
+    if not bool(row_value(work, "allow_favorites", 1)):
+        return json_error("作者已关闭收藏", 403)
     db = get_db()
     existing = db.execute("SELECT 1 FROM favorites WHERE user_id = ? AND work_id = ?", (g.user["id"], work_id)).fetchone()
     if existing:
@@ -992,9 +1497,11 @@ def toggle_favorite(work_id: int):
 @app.post("/api/works/<int:work_id>/comments")
 @require_auth
 def create_comment(work_id: int):
-    work = get_work(work_id)
+    work = public_work(work_id)
     if not work:
         return json_error("作品不存在", 404)
+    if not bool(row_value(work, "allow_comments", 1)):
+        return json_error("作者已关闭评论", 403)
     payload = request_json()
     text = clean_text(payload.get("text"), 500, required=True)
     cursor = get_db().execute(
@@ -1217,6 +1724,234 @@ def toggle_announcement(announcement_id: int):
     new_status = "archived" if row["status"] == "published" else "published"
     get_db().execute("UPDATE announcements SET status = ?, updated_at = ? WHERE id = ?", (new_status, now_ms(), announcement_id))
     audit("更新公告", "announcement", str(announcement_id), f"{'发布' if new_status == 'published' else '撤回'}公告《{row['title']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/works/<int:work_id>/review")
+@require_admin
+def review_work(work_id: int):
+    payload = request_json()
+    action = clean_text(payload.get("action"), 20, required=True)
+    note = clean_text(payload.get("note"), 300)
+    if action not in {"publish", "reject", "hide"}:
+        return json_error("审核操作无效", 400)
+    work = get_db().execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
+    if not work:
+        return json_error("作品不存在", 404)
+    status = {"publish": "published", "reject": "rejected", "hide": "hidden"}[action]
+    published_at = now_ms() if action == "publish" else work["published_at"]
+    get_db().execute(
+        "UPDATE works SET status = ?, review_note = ?, published_at = ?, updated_at = ? WHERE id = ?",
+        (status, note, published_at, now_ms(), work_id),
+    )
+    label = {"publish": "通过审核", "reject": "退回修改", "hide": "下架作品"}[action]
+    notify(work["author_id"], f"作品《{work['title']}》{label}。" + (f" 审核意见：{note}" if note else ""), "work", f"#/work/w{work_id}")
+    audit(label, "work", str(work_id), f"{label}《{work['title']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/comments/<int:comment_id>/delete")
+@require_admin
+def delete_comment(comment_id: int):
+    comment = get_db().execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
+    if not comment:
+        return json_error("评论不存在", 404)
+    get_db().execute("UPDATE comments SET deleted_at = ? WHERE id = ?", (now_ms(), comment_id))
+    audit("删除评论", "comment", str(comment_id), "管理员删除评论", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/reports/<int:report_id>/status")
+@require_admin
+def update_report_status(report_id: int):
+    payload = request_json()
+    status = clean_text(payload.get("status"), 20, required=True)
+    if status not in {"待处理", "处理中", "已处理", "已驳回"}:
+        return json_error("举报状态无效", 400)
+    row = get_db().execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+    if not row:
+        return json_error("举报记录不存在", 404)
+    get_db().execute("UPDATE reports SET status = ?, handled_at = ?, handled_by = ? WHERE id = ?", (status, now_ms(), g.user["id"], report_id))
+    audit("处理举报", "report", str(report_id), f"举报状态更新为{status}", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/activities")
+@require_admin
+def create_activity():
+    payload = request_json()
+    title = clean_text(payload.get("title"), 80, required=True)
+    description = clean_text(payload.get("description"), 1000)
+    starts_at = clean_text(payload.get("startsAt"), 30)
+    ends_at = clean_text(payload.get("endsAt"), 30)
+    status = clean_text(payload.get("status") or "筹备中", 20)
+    rules = clean_text(payload.get("rules"), 1000)
+    if status not in {"筹备中", "报名中", "进行中", "已结束"}:
+        return json_error("活动状态无效", 400)
+    cursor = get_db().execute(
+        "INSERT INTO activities (title, description, starts_at, ends_at, status, rules, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (title, description, starts_at, ends_at, status, rules, now_ms()),
+    )
+    audit("创建活动", "activity", str(cursor.lastrowid), f"创建活动《{title}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/monthly-awards")
+@require_admin
+def save_monthly_award():
+    payload = request_json()
+    work_id = parse_public_id(payload.get("workId"))
+    month = clean_text(payload.get("month"), 7, required=True)
+    if not work_id or not re.fullmatch(r"\d{4}-\d{2}", month):
+        return json_error("月份或作品无效", 400)
+    try:
+        rank = int(payload.get("rank", 1))
+    except (TypeError, ValueError):
+        return json_error("名次无效", 400)
+    if rank < 1 or rank > 20:
+        return json_error("名次无效", 400)
+    reason = clean_text(payload.get("reason"), 300)
+    work = get_db().execute("SELECT * FROM works WHERE id = ? AND status = 'published' AND is_public = 1", (work_id,)).fetchone()
+    if not work:
+        return json_error("只有公开作品可以进入月度优秀", 400)
+    existing = get_db().execute(
+        "SELECT id FROM monthly_awards WHERE work_id = ? AND month = ? AND status = 'active'",
+        (work_id, month),
+    ).fetchone()
+    if existing:
+        get_db().execute(
+            "UPDATE monthly_awards SET category = ?, rank = ?, reason = ?, selected_at = ?, selected_by = ? WHERE id = ?",
+            (work["category"], rank, reason, now_ms(), g.user["id"], existing["id"]),
+        )
+        award_id = existing["id"]
+    else:
+        cursor = get_db().execute(
+            """
+            INSERT INTO monthly_awards (work_id, author_id, category, month, rank, reason, selected_at, selected_by, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            """,
+            (work_id, work["author_id"], work["category"], month, rank, reason, now_ms(), g.user["id"]),
+        )
+        award_id = cursor.lastrowid
+    notify(work["author_id"], f"作品《{work['title']}》入选 {month} 月度优秀。", "award", f"#/work/w{work_id}")
+    audit("月度评选", "monthly_award", str(award_id), f"{month} 入选《{work['title']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/monthly-awards/<int:award_id>/revoke")
+@require_admin
+def revoke_monthly_award(award_id: int):
+    row = get_db().execute("SELECT * FROM monthly_awards WHERE id = ? AND status = 'active'", (award_id,)).fetchone()
+    if not row:
+        return json_error("获奖记录不存在", 404)
+    get_db().execute("UPDATE monthly_awards SET status = 'revoked' WHERE id = ?", (award_id,))
+    audit("撤销获奖", "monthly_award", str(award_id), "撤销月度优秀记录", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/users/<int:user_id>/status")
+@require_admin
+def update_user_status(user_id: int):
+    payload = request_json()
+    status = clean_text(payload.get("status"), 20, required=True)
+    if status not in {"active", "suspended"}:
+        return json_error("用户状态无效", 400)
+    target = user_row(user_id)
+    if not target:
+        return json_error("用户不存在", 404)
+    if target["role"] == "admin":
+        return json_error("不能修改管理员账号状态", 403)
+    if user_id == g.user["id"]:
+        return json_error("不能修改自己的账号状态", 400)
+    get_db().execute("UPDATE users SET account_status = ? WHERE id = ?", (status, user_id))
+    audit("更新用户状态", "user", str(user_id), f"用户状态更新为{status}", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/admins/appoint")
+@require_super_admin
+def appoint_admin():
+    payload = request_json()
+    user_id = parse_public_id(payload.get("userId"))
+    target = user_row(user_id) if user_id else None
+    if not target or target["role"] != "reader":
+        return json_error("只能任命普通用户为高级管理员", 400)
+    existing = get_db().execute("SELECT * FROM admin_roles WHERE user_id = ?", (user_id,)).fetchone()
+    if existing:
+        return json_error("该用户已经拥有管理员身份", 409)
+    current_count = get_db().execute("SELECT COUNT(*) AS count FROM admin_roles WHERE level = 'senior'").fetchone()["count"]
+    if current_count >= 2:
+        return json_error("高级管理员最多 2 名", 409)
+    get_db().execute(
+        "INSERT INTO admin_roles (user_id, level, appointed_by, appointed_at, updated_at) VALUES (?, 'senior', ?, ?, ?)",
+        (user_id, g.user["id"], now_ms(), now_ms()),
+    )
+    get_db().execute("UPDATE users SET role = 'admin' WHERE id = ?", (user_id,))
+    notify(user_id, "你已被任命为高级管理员。", "admin")
+    audit("任命高级管理员", "user", str(user_id), f"任命 {target['display_name']} 为高级管理员", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/admins/revoke")
+@require_super_admin
+def revoke_admin():
+    payload = request_json()
+    user_id = parse_public_id(payload.get("userId"))
+    target = user_row(user_id) if user_id else None
+    if not target or user_id == g.user["id"]:
+        return json_error("不能撤销该账号", 400)
+    role = get_db().execute("SELECT * FROM admin_roles WHERE user_id = ? AND level = 'senior'", (user_id,)).fetchone()
+    if not role:
+        return json_error("该用户不是高级管理员", 404)
+    get_db().execute("DELETE FROM admin_roles WHERE user_id = ?", (user_id,))
+    get_db().execute("UPDATE users SET role = 'reader' WHERE id = ?", (user_id,))
+    get_db().execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    notify(user_id, "你的高级管理员权限已被撤销。", "admin")
+    audit("撤销高级管理员", "user", str(user_id), f"撤销 {target['display_name']} 的高级管理员权限", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/admins/transfer")
+@require_super_admin
+def transfer_admin():
+    payload = request_json()
+    old_id = parse_public_id(payload.get("oldAdminId"))
+    new_id = parse_public_id(payload.get("newAdminId"))
+    reason = clean_text(payload.get("reason"), 300, required=True)
+    old_user = user_row(old_id) if old_id else None
+    new_user = user_row(new_id) if new_id else None
+    if not old_user or not new_user or old_id == new_id:
+        return json_error("转交账号无效", 400)
+    old_role = get_db().execute("SELECT * FROM admin_roles WHERE user_id = ? AND level = 'senior'", (old_id,)).fetchone()
+    if not old_role:
+        return json_error("原账号不是高级管理员", 400)
+    if new_user["role"] != "reader":
+        return json_error("新账号必须为普通用户", 400)
+    get_db().execute("DELETE FROM admin_roles WHERE user_id = ?", (old_id,))
+    get_db().execute(
+        "INSERT INTO admin_roles (user_id, level, appointed_by, appointed_at, updated_at) VALUES (?, 'senior', ?, ?, ?)",
+        (new_id, g.user["id"], now_ms(), now_ms()),
+    )
+    get_db().execute("UPDATE users SET role = 'reader' WHERE id = ?", (old_id,))
+    get_db().execute("UPDATE users SET role = 'admin' WHERE id = ?", (new_id,))
+    get_db().execute("DELETE FROM sessions WHERE user_id = ?", (old_id,))
+    get_db().execute(
+        "INSERT INTO admin_transfers (old_admin_id, new_admin_id, operator_id, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+        (old_id, new_id, g.user["id"], reason, now_ms()),
+    )
+    notify(old_id, "你的高级管理员权限已转交。", "admin")
+    notify(new_id, "你已接任高级管理员。", "admin")
+    audit("转交高级管理员", "user", str(new_id), f"{old_user['display_name']} 转交 {new_user['display_name']}：{reason}", g.user["id"])
     get_db().commit()
     return json_ok(bootstrap_payload())
 
