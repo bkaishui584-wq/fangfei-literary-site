@@ -11,12 +11,14 @@
     qingli: { name: "青璃·映界", image: "images/styles/qingli.webp", description: "清透青绿与柔和暖光交织。" }
   };
   const THEME_KEY = "fangfei_theme_v1";
+  const DEFAULT_RANKING_WEIGHTS = Object.freeze({ views: 1, likes: 8, favorites: 10, comments: 4 });
   const DATA_VERSION = 6;
   const EMPTY_STATE = {
     schemaVersion: DATA_VERSION,
     currentUser: { id: "", name: "访客", role: "guest" },
     followed: [],
     blocked: [],
+    blockedUsers: [],
     likedWorks: [],
     favoritedWorks: [],
     notifications: [],
@@ -34,7 +36,7 @@
     adminRoles: [],
     adminTransfers: [],
     rankings: {},
-    rankingWeights: { views: 1, likes: 8, favorites: 10, comments: 4 }
+    rankingWeights: { ...DEFAULT_RANKING_WEIGHTS }
   };
   const loadState = () => structuredClone(EMPTY_STATE);
 
@@ -295,7 +297,7 @@
 
 
   function openPrivacySettings() {
-    const blocked = state.blocked.map((id) => authorById(id)).filter(Boolean);
+    const blocked = state.blockedUsers?.length ? state.blockedUsers : state.blocked.map((id) => authorById(id)).filter(Boolean);
     openModal("隐私与私信", `<p class="muted">私信权限由账户设置控制，拉黑名单只影响你的账号。</p><div class="profile-summary"><div><strong>${state.messageSettings.allowStrangers ? "允许陌生人私信" : "仅允许关注者私信"}</strong><small>${state.messageSettings.notifications ? "消息提醒已开启" : "消息提醒已关闭"}</small></div></div><section class="section"><h3 class="section-title">已拉黑用户</h3>${blocked.length ? `<ul class="admin-list">${blocked.map((author) => `<li class="admin-row"><span>${escapeHtml(author.name)}</span><button class="button button-small" type="button" data-block-author="${author.id}">解除拉黑</button></li>`).join("")}</ul>` : '<div class="empty compact-empty">暂无拉黑用户。</div>'}</section>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>关闭</button><button class="button button-primary" type="button" data-message-settings>管理私信设置</button></div>');
   }
 
@@ -640,6 +642,21 @@
     });
   }
 
+  function openNotificationSettings() {
+    if (!ensureLoggedIn()) return;
+    const settings = state.messageSettings;
+    openModal("通知设置", `<form id="notification-settings-form"><label class="setting-row"><span><strong>接收站内通知</strong><small>关闭后顶部未读提醒会隐藏，已有通知仍会保留。</small></span><input type="checkbox" name="notifications" ${settings.notifications ? "checked" : ""}></label></form>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-primary" type="button" id="save-notification-settings">保存设置</button></div>');
+    document.querySelector("#save-notification-settings").addEventListener("click", async () => {
+      const enabled = new FormData(document.querySelector("#notification-settings-form")).get("notifications") === "on";
+      await performAction("/api/message-settings", {
+        allowStrangers: settings.allowStrangers,
+        notifications: enabled,
+        recallMinutes: Number(settings.recallMinutes)
+      }, "通知设置已保存", () => { closeModal(); renderHeader(); });
+    });
+  }
+
+
   function reportDialog(title, conversation, messageId) {
     if (!ensureLoggedIn()) return;
     const reasons = ["骚扰或辱骂", "色情或低俗内容", "暴力或威胁", "违法内容", "垃圾信息", "其他"];
@@ -683,7 +700,7 @@
 
 
   function rankingScore(work) {
-    const weights = state.rankingWeights || { views: 1, likes: 8, favorites: 10, comments: 4 };
+    const weights = state.rankingWeights || DEFAULT_RANKING_WEIGHTS;
     return (Number(work.views) || 0) * Number(weights.views || 0)
       + (Number(work.likes) || 0) * Number(weights.likes || 0)
       + (Number(work.favorites) || 0) * Number(weights.favorites || 0)
@@ -720,7 +737,7 @@
     const authorKeys = { works: "works", awards: "awards", words: "words", popularity: "popularity" };
     const workPanel = workRows.length ? `<div class="rank-podium">${workRows.slice(0, 3).map((work, index) => `<article class="rank-podium-card rank-${index + 1}"><span>${index + 1}</span><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><small>${escapeHtml(work.author)}</small><strong>${Number(work.score ?? rankingScore(work))} 热度</strong><small>${Number(work.views) || 0} 阅读 · ${Number(work.likes) || 0} 点赞 · ${Number(work.favorites) || 0} 收藏</small></article>`).join("")}</div><ol class="rank-list">${workRows.slice(3).map((work, index) => `<li class="rank-item"><span class="rank-number">${String(index + 4).padStart(2, "0")}</span><button class="link-button rank-title" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><span class="muted">${escapeHtml(work.author)} · ${Number(work.score ?? rankingScore(work))} 热度 · ${Number(work.views) || 0} 阅读 · ${Number(work.likes) || 0} 点赞 · ${Number(work.comments) || 0} 评论</span></li>`).join("")}</ol>` : '<div class="empty compact-empty">所选周期暂无排行数据。</div>';
     const authorPanel = authorRows.length ? `<ol class="rank-list">${authorRows.map((author, index) => `<li class="rank-item"><span class="rank-number">${String(index + 1).padStart(2, "0")}</span><button class="link-button rank-title" type="button" data-author="${author.id}">${escapeHtml(author.name)}</button><span class="muted">${authorLabels[rankingAuthorMetric]} ${Number(author[authorKeys[rankingAuthorMetric]]) || 0} · ${Number(author.works) || 0} 篇作品 · ${Number(author.awards) || 0} 次获奖 · ${Number(author.words) || 0} 字</span></li>`).join("")}</ol>` : '<div class="empty compact-empty">暂无作者排行数据。</div>';
-    const weights = state.rankingWeights || { views: 1, likes: 8, favorites: 10, comments: 4 };
+    const weights = state.rankingWeights || DEFAULT_RANKING_WEIGHTS;
     app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">真实数据，不合成虚假结果</p><h1 class="page-title">排行榜</h1><p class="page-note">只统计已审核、已公开且未删除作品。月度 / 季度 / 年度热度只计算所选周期内的真实互动；总榜使用现有累计阅读。热度 = 阅读 ${weights.views} + 点赞 ${weights.likes} + 收藏 ${weights.favorites} + 评论 ${weights.comments} 的加权结果。</p></div></header><div class="ranking-controls"><div class="rank-tabs">${periods.map(([id, label]) => `<button class="${rankingPeriod === id ? "is-active" : ""}" type="button" data-rank-period="${id}">${label}</button>`).join("")}</div><div class="rank-tabs"><button class="${rankingBoard === "works" ? "is-active" : ""}" type="button" data-rank-board="works">作品榜</button><button class="${rankingBoard === "authors" ? "is-active" : ""}" type="button" data-rank-board="authors">作者榜</button></div></div>${rankingBoard === "works" ? workPanel : `<div class="rank-tabs rank-subtabs">${Object.entries(authorLabels).map(([id, label]) => `<button class="${rankingAuthorMetric === id ? "is-active" : ""}" type="button" data-rank-author-metric="${id}">${label}</button>`).join("")}</div>${authorPanel}`}</div>`;
   }
 
@@ -984,7 +1001,8 @@
     const target = event.target.closest("button");
     if (!target) return;
     if (target.matches("[data-message-settings]")) return openMessageSettings();
-    if (target.matches("[data-profile-notifications]")) return openMessageSettings();
+    if (target.matches("[data-profile-notifications]")) return openNotificationSettings();
+    if (target.matches("[data-block-author]")) return performAction(`/api/users/${numericId(target.dataset.blockAuthor)}/block`, {}, "已解除拉黑", () => openPrivacySettings());
     if (target.matches("[data-profile-privacy]")) return openPrivacySettings();
     if (target.matches("[data-profile-password]")) return openChangePassword();
     if (target.matches("[data-profile-edit]")) return openProfileEditor();

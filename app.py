@@ -34,6 +34,7 @@ PUBLIC_ROOTS = {"assets", "css", "images", "js", "vendor"}
 PUBLIC_FILES = {"app.js", "styles.css", "pet.js", "favicon.ico"}
 WORK_CATEGORIES = {"小说", "诗歌", "散文", "随笔", "剧本", "科幻", "杂文", "其他"}
 PROFILE_COVER_THEMES = {"starry", "deepsea", "sky", "flower", "dragon", "qingli", ""}
+RANKING_WEIGHTS = {"views": 1, "likes": 8, "favorites": 10, "comments": 4}
 
 app = Flask(__name__)
 app.config.update(
@@ -772,7 +773,12 @@ def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) ->
                     "SELECT COUNT(*) AS count FROM comments WHERE work_id = ? AND deleted_at IS NULL",
                     (work_id,),
                 ).fetchone()["count"]
-            score = views + likes * 8 + favorites * 10 + comments * 4
+            score = (
+                views * RANKING_WEIGHTS["views"]
+                + likes * RANKING_WEIGHTS["likes"]
+                + favorites * RANKING_WEIGHTS["favorites"]
+                + comments * RANKING_WEIGHTS["comments"]
+            )
             work_items.append(
                 {
                     "id": f"w{work_id}",
@@ -806,9 +812,17 @@ def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) ->
 
         award_sql = "SELECT author_id, COUNT(*) AS count FROM monthly_awards WHERE status = 'active'"
         award_params: list[object] = []
-        if start:
-            award_sql += " AND selected_at >= ?"
-            award_params.append(start)
+        current = datetime.now(timezone.utc)
+        if period == "month":
+            award_sql += " AND month = ?"
+            award_params.append(current.strftime("%Y-%m"))
+        elif period == "quarter":
+            start_month = ((current.month - 1) // 3) * 3 + 1
+            award_sql += " AND month >= ? AND month <= ?"
+            award_params.extend((f"{current.year}-{start_month:02d}", f"{current.year}-{start_month + 2:02d}"))
+        elif period == "year":
+            award_sql += " AND month LIKE ?"
+            award_params.append(f"{current.year}-%")
         award_sql += " GROUP BY author_id"
         for row in db.execute(award_sql, award_params).fetchall():
             author_id = f"u{row['author_id']}"
@@ -974,6 +988,7 @@ def build_state(user) -> dict:
 
     followed = []
     blocked = []
+    blocked_users = []
     liked = []
     favorited = []
     notifications = []
@@ -987,7 +1002,15 @@ def build_state(user) -> dict:
 
     if user_id:
         followed = [f"u{row['author_id']}" for row in db.execute("SELECT author_id FROM follows WHERE follower_id = ?", (user_id,)).fetchall()]
-        blocked = [f"u{row['blocked_id']}" for row in db.execute("SELECT blocked_id FROM blocks WHERE blocker_id = ?", (user_id,)).fetchall()]
+        blocked_rows = db.execute(
+            """
+            SELECT u.* FROM blocks b JOIN users u ON u.id = b.blocked_id
+            WHERE b.blocker_id = ? ORDER BY b.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        blocked = [f"u{row['id']}" for row in blocked_rows]
+        blocked_users = [public_user(row) for row in blocked_rows]
         liked = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM likes WHERE user_id = ?", (user_id,)).fetchall()]
         favorited = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM favorites WHERE user_id = ?", (user_id,)).fetchall()]
         notifications = [
@@ -1134,6 +1157,7 @@ def build_state(user) -> dict:
         "currentUser": current_user,
         "followed": followed,
         "blocked": blocked,
+        "blockedUsers": blocked_users,
         "likedWorks": liked,
         "favoritedWorks": favorited,
         "notifications": notifications,
@@ -1151,7 +1175,7 @@ def build_state(user) -> dict:
         "adminRoles": admin_roles,
         "adminTransfers": admin_transfers,
         "rankings": build_rankings(db, authors),
-        "rankingWeights": {"views": 1, "likes": 8, "favorites": 10, "comments": 4},
+        "rankingWeights": RANKING_WEIGHTS,
     }
 
 
@@ -1660,7 +1684,10 @@ def save_message_settings():
     payload = request_json()
     allow_strangers = bool(payload.get("allowStrangers", True))
     notifications = bool(payload.get("notifications", True))
-    recall_minutes = int(payload.get("recallMinutes", 2))
+    try:
+        recall_minutes = int(payload.get("recallMinutes", 2))
+    except (TypeError, ValueError):
+        return json_error("撤回时间无效", 400)
     if recall_minutes not in {2, 5, 10}:
         return json_error("撤回时间无效", 400)
     ensure_message_settings(g.user["id"])
