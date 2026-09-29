@@ -867,31 +867,57 @@
 
   function openPublish(workId = "") {
     if (!ensureLoggedIn()) return;
-    const existing = workId ? workById(workId) : null;
-    if (workId && !existing) return showToast("作品不存在");
+    const targetId = workId ? String(workId) : "";
+    const existing = targetId ? workById(targetId) : null;
+    if (targetId && !existing) return showToast("作品不存在");
+    setRoute(targetId ? `publish/${existing.id}` : "publish");
+  }
+
+
+  function renderPublish(workId = "") {
+    if (!state.currentUser?.id) return renderMissing("请先登录后投稿");
+    const targetId = workId ? String(workId) : "";
+    const existing = targetId ? workById(targetId) : null;
+    if (targetId && !existing) return renderMissing("作品不存在或无权访问");
+    if (existing && !["draft", "rejected"].includes(existing.status)) return renderMissing("只有草稿或未通过作品可以编辑");
     const bodyText = (existing?.body || []).join("\n\n");
-    const form = `
+    app.innerHTML = `<div class="page publish-page">
+      <header class="page-head publish-page-head">
+        <div><p class="eyebrow">FANGFEI SUBMISSION STUDIO</p><h1 class="page-title">${existing ? "编辑投稿" : "新投稿"}</h1><p class="page-note">在独立编辑页里整理标题、正文与投稿设置，保存草稿后可以稍后继续。</p></div>
+        <button class="button button-quiet" type="button" data-route="profile">返回个人中心</button>
+      </header>
       <form id="publish-form" class="publish-form">
-        <section class="publish-section"><div class="publish-section-head"><span>01</span><div><h3>基础信息</h3><p>标题、体裁、标签与作品简介。</p></div></div>
-          <div class="form-grid"><div class="field"><label>作品标题</label><input class="input" name="title" maxlength="80" value="${escapeHtml(existing?.title || "")}" required autofocus></div><div class="field"><label>作品类型</label><select class="select" name="category">${categories.slice(1).map((category) => `<option ${existing?.category === category ? "selected" : ""}>${category}</option>`).join("")}</select></div></div>
-          <div class="field"><label>标签</label><input class="input" name="tags" maxlength="120" value="${escapeHtml((existing?.tags || []).join("，"))}" placeholder="多个标签用逗号分隔"></div>
-          <div class="field"><label>作品简介</label><textarea class="textarea" name="excerpt" maxlength="200" placeholder="一句话说明作品内容，可选">${escapeHtml(existing?.excerpt || "")}</textarea></div>
-        </section>
-        <section class="publish-section"><div class="publish-section-head"><span>02</span><div><h3>正文</h3><p>用空行分隔段落。提交前请检查作品完整性。</p></div></div>
-          <div class="field"><textarea class="textarea publish-body" name="body" maxlength="10000" placeholder="在这里写下作品正文">${escapeHtml(bodyText)}</textarea></div>
-          <div class="publish-status"><span id="publish-word-count">${bodyText.replace(/\s/g, "").length} 字</span><span id="publish-save-state">尚未保存</span></div>
-        </section>
-        <section class="publish-section"><div class="publish-section-head"><span>03</span><div><h3>投稿设置</h3><p>以下开关由服务端保存。</p></div></div>
-          <label class="setting-row"><span><strong>公开展示</strong><small>审核通过后允许所有访客阅读。</small></span><input type="checkbox" name="isPublic" ${existing?.isPublic === false ? "" : "checked"}></label>
-          <label class="setting-row"><span><strong>允许评论</strong><small>关闭后读者不能发表评论。</small></span><input type="checkbox" name="allowComments" ${existing?.allowComments === false ? "" : "checked"}></label>
-          <label class="setting-row"><span><strong>允许收藏</strong><small>关闭后读者不能收藏作品。</small></span><input type="checkbox" name="allowFavorites" ${existing?.allowFavorites === false ? "" : "checked"}></label>
-        </section>
-        <section class="publish-section"><div class="publish-section-head"><span>04</span><div><h3>原创声明</h3><p>确认后才能提交审核。</p></div></div>
-          <label class="setting-row"><span><strong>原创与发表权确认</strong><small>我确认这是我的原创作品，或我拥有合法发表权。</small></span><input type="checkbox" name="originalConfirmed" ${existing?.originalConfirmed ? "checked" : ""}></label>
-          <label class="setting-row"><span><strong>公开展示授权</strong><small>我同意芳菲文学社按照平台规则公开展示该作品。</small></span><input type="checkbox" name="rightsConfirmed" ${existing?.rightsConfirmed ? "checked" : ""}></label>
-        </section>
-      </form>`;
-    openModal(existing ? "编辑投稿" : "投稿作品", form, '<div class="modal-actions publish-actions"><button class="button" type="button" id="save-draft">保存草稿</button><button class="button button-primary" type="button" id="submit-review">提交审核</button></div>');
+        <div class="publish-layout">
+          <div class="publish-main">
+            <section class="publish-card">
+              <div class="publish-section-head"><span>01</span><div><h3>基础信息</h3><p>标题、体裁、标签与作品简介。</p></div></div>
+              <div class="form-grid"><div class="field"><label>作品标题</label><input class="input" name="title" maxlength="80" value="${escapeHtml(existing?.title || "")}" required autofocus></div><div class="field"><label>作品类型</label><select class="select" name="category">${categories.slice(1).map((category) => `<option ${existing?.category === category ? "selected" : ""}>${category}</option>`).join("")}</select></div></div>
+              <div class="field"><label>标签</label><input class="input" name="tags" maxlength="120" value="${escapeHtml((existing?.tags || []).join("，"))}" placeholder="多个标签用逗号分隔"></div>
+              <div class="field"><label>作品简介</label><textarea class="textarea" name="excerpt" maxlength="200" placeholder="一句话说明作品内容，可选">${escapeHtml(existing?.excerpt || "")}</textarea></div>
+            </section>
+            <section class="publish-card publish-editor-card">
+              <div class="publish-section-head"><span>02</span><div><h3>正文</h3><p>用空行分隔段落。提交前请检查作品完整性。</p></div></div>
+              <div class="field"><textarea class="textarea publish-body" name="body" maxlength="10000" placeholder="在这里写下作品正文">${escapeHtml(bodyText)}</textarea></div>
+              <div class="publish-status"><span id="publish-word-count">${bodyText.replace(/\s/g, "").length} 字</span><span id="publish-save-state">尚未保存</span></div>
+            </section>
+          </div>
+          <aside class="publish-side">
+            <section class="publish-card">
+              <div class="publish-section-head"><span>03</span><div><h3>投稿设置</h3><p>以下开关由服务端保存。</p></div></div>
+              <label class="setting-row"><span><strong>公开展示</strong><small>审核通过后允许所有访客阅读。</small></span><input type="checkbox" name="isPublic" ${existing?.isPublic === false ? "" : "checked"}></label>
+              <label class="setting-row"><span><strong>允许评论</strong><small>关闭后读者不能发表评论。</small></span><input type="checkbox" name="allowComments" ${existing?.allowComments === false ? "" : "checked"}></label>
+              <label class="setting-row"><span><strong>允许收藏</strong><small>关闭后读者不能收藏作品。</small></span><input type="checkbox" name="allowFavorites" ${existing?.allowFavorites === false ? "" : "checked"}></label>
+            </section>
+            <section class="publish-card">
+              <div class="publish-section-head"><span>04</span><div><h3>原创声明</h3><p>确认后才能提交审核。</p></div></div>
+              <label class="setting-row"><span><strong>原创与发表权确认</strong><small>我确认这是我的原创作品，或我拥有合法发表权。</small></span><input type="checkbox" name="originalConfirmed" ${existing?.originalConfirmed ? "checked" : ""}></label>
+              <label class="setting-row"><span><strong>公开展示授权</strong><small>我同意芳菲文学社按照平台规则公开展示该作品。</small></span><input type="checkbox" name="rightsConfirmed" ${existing?.rightsConfirmed ? "checked" : ""}></label>
+            </section>
+            <div class="publish-page-actions"><button class="button" type="button" id="save-draft">保存草稿</button><button class="button button-primary" type="button" id="submit-review">提交审核</button></div>
+          </aside>
+        </div>
+      </form>
+    </div>`;
     const body = document.querySelector(".publish-body");
     const wordCount = document.querySelector("#publish-word-count");
     const saveState = document.querySelector("#publish-save-state");
@@ -917,7 +943,7 @@
         rightsConfirmed: data.get("rightsConfirmed") === "on"
       };
       const path = existing ? `/api/works/${numericId(existing.id)}` : "/api/works";
-      await performAction(path, payload, action === "draft" ? "草稿已保存" : "作品已提交审核", () => { closeModal(); profileTab = "works"; setRoute("profile"); });
+      await performAction(path, payload, action === "draft" ? "草稿已保存" : "作品已提交审核", () => { profileTab = "works"; setRoute("profile"); });
     };
     document.querySelector("#save-draft")?.addEventListener("click", () => saveDraft("draft"));
     document.querySelector("#submit-review")?.addEventListener("click", () => saveDraft("submit"));
@@ -981,6 +1007,8 @@
     if (route === "ranking") return renderRanking();
     if (route === "activities") return renderActivities();
     if (route === "profile") return renderProfile();
+    if (route === "publish") return renderPublish();
+    if (route.startsWith("publish/")) return renderPublish(route.split("/")[1]);
     if (route === "admin") return renderAdmin();
     return renderHome();
   }
@@ -1037,7 +1065,7 @@
     if (target.matches("[data-activity]")) { const activity = byId(target.dataset.activity, state.activities); return openModal(activity.title, `<p>${escapeHtml(activity.desc)}</p><p class="muted">活动时间：${escapeHtml(activity.date)} · 当前状态：${escapeHtml(activity.status)}。报名通知会出现在站内消息中。</p>`); }
   });
 
-  document.querySelector("#publish-button").addEventListener("click", openPublish);
+  document.querySelector("#publish-button").addEventListener("click", () => openPublish());
   document.querySelector("#notification-button").addEventListener("click", renderNotifications);
   document.querySelector("#user-button").addEventListener("click", openProfile);
   modalLayer.addEventListener("click", (event) => { if (event.target === modalLayer) closeModal(); });
