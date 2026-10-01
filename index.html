@@ -6,7 +6,7 @@
   <meta name="description" content="芳菲文学社，面向青年作者的文学作品创作与交流平台。">
   <title>芳菲文学社｜写作、阅读与相遇</title>
   <link rel="stylesheet" href="vendor/fontawesome/css/all.min.css">
-  <link rel="stylesheet" href="styles.css?v=20261001-v23">
+  <link rel="stylesheet" href="styles.css?v=20261001-v24">
 </head>
 <body>
   <a class="skip-link" href="#app">跳到主要内容</a>
@@ -20,18 +20,23 @@
         <small>Fangfei Literary Society</small>
       </span>
     </button>
-    <nav class="site-nav" aria-label="主导航">
+    <nav class="site-nav" id="site-nav" aria-label="主导航">
       <button type="button" data-route="home">首页</button>
       <button type="button" data-route="works">作品</button>
       <button type="button" data-route="authors">作者</button>
-      <button type="button" data-route="messages">私信 <span class="nav-count" id="nav-unread" hidden>0</span></button>
+      <button type="button" data-route="messages">私信 <span class="nav-count" id="nav-unread" data-unread-badge hidden>0</span></button>
       <button type="button" data-route="monthly">月度优秀</button>
       <button type="button" data-route="ranking">排行榜</button>
       <button type="button" data-route="topics">每周话题</button>
       <button type="button" data-route="activities">文学活动</button>
       <button type="button" data-route="admin" data-admin-only hidden>管理后台</button>
+      <button type="button" class="nav-mobile-only" data-nav-notify>通知 <span class="nav-count" data-notify-badge hidden>0</span></button>
+      <button type="button" class="nav-mobile-only" data-nav-profile>我的</button>
     </nav>
     <div class="head-actions">
+      <button class="nav-toggle" type="button" id="nav-toggle" aria-label="打开菜单" aria-expanded="false" aria-controls="site-nav">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
       <button class="icon-button" type="button" id="notification-button" aria-label="通知">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 8h18c0-1-3-1-3-8M10 21h4"/></svg>
         <span id="notification-count">0</span>
@@ -40,6 +45,8 @@
       <button class="user-chip" type="button" id="user-button"><span>我</span> 我的</button>
     </div>
   </header>
+
+  <div class="nav-backdrop" id="nav-backdrop" hidden></div>
 
   <main id="app" tabindex="-1"></main>
 
@@ -59,7 +66,7 @@
     <img src="assets/pet/pet.svg" alt="" aria-hidden="true" width="710" height="600" decoding="async" draggable="false">
   </div>
   <div class="toast" id="toast" hidden></div>
-  <script src="pet.js?v=20261001-v23" defer></script>
-  <script src="app.js?v=20261001-v23" defer></script>
+  <script src="pet.js?v=20261001-v24" defer></script>
+  <script src="app.js?v=20261001-v24" defer></script>
 </body>
 </html>

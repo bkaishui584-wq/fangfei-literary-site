@@ -52,6 +52,7 @@
   let adminTab = "概览";
   let profileTab = "works";
   let publishTopicId = "";
+  let mobileChatOpen = false;
   let rankingPeriod = "month";
   let rankingBoard = "works";
   let rankingAuthorMetric = "works";
@@ -358,6 +359,24 @@
     modalContent.querySelector("[autofocus]")?.focus();
   }
 
+  function navToggleButton() { return document.querySelector("#nav-toggle"); }
+
+  function setNavOpen(open) {
+    document.body.classList.toggle("nav-open", open);
+    document.documentElement.style.overflow = open ? "hidden" : "";
+    const toggle = navToggleButton();
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      toggle.setAttribute("aria-label", open ? "关闭菜单" : "打开菜单");
+    }
+    const backdrop = document.querySelector("#nav-backdrop");
+    if (backdrop) backdrop.hidden = !open;
+  }
+
+  function closeNav() {
+    if (document.body.classList.contains("nav-open")) setNavOpen(false);
+  }
+
   function closeModal() {
     const resolve = dialogResolver;
     dialogResolver = null;
@@ -395,6 +414,8 @@
   }
 
   function setRoute(next) {
+    closeNav();
+    if (next !== "messages") mobileChatOpen = false;
     route = next;
     location.hash = next === "home" ? "" : `/${next}`;
     render();
@@ -410,13 +431,15 @@
     const userButton = document.querySelector("#user-button");
     if (userButton) userButton.innerHTML = state.currentUser?.role === "guest" ? "登录 / 注册" : `<span>${escapeHtml(state.currentUser.name.slice(0, 1))}</span> 我的`;
     const unread = state.conversations.filter((conversation) => !conversation.hidden).reduce((sum, conversation) => sum + conversation.unread, 0);
-    const unreadElement = document.querySelector("#nav-unread");
-    unreadElement.textContent = unread;
-    unreadElement.hidden = unread === 0;
+    document.querySelectorAll("[data-unread-badge]").forEach((element) => {
+      element.textContent = unread;
+      element.hidden = unread === 0;
+    });
     const unreadNotifications = state.messageSettings.notifications ? state.notifications.filter((item) => !item.read).length : 0;
-    const notificationCount = document.querySelector("#notification-count");
-    notificationCount.textContent = unreadNotifications;
-    notificationCount.hidden = unreadNotifications === 0;
+    document.querySelectorAll("#notification-count, [data-notify-badge]").forEach((element) => {
+      element.textContent = unreadNotifications;
+      element.hidden = unreadNotifications === 0;
+    });
     document.querySelector("#notification-button")?.setAttribute("aria-label", unreadNotifications ? `${unreadNotifications} 条通知` : "通知");
   }
 
@@ -572,7 +595,7 @@
     const unread = visible.reduce((sum, conversation) => sum + conversation.unread, 0);
     if (current) activeConversation = current.id;
     app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">只对彼此可见</p><h1 class="page-title">私信</h1><p class="page-note">与作者讨论作品、交流写作计划。删除会话只会从你的列表隐藏，不会删除双方历史消息。</p></div><div class="message-head-actions"><span class="message-unread-summary">${unread ? `${unread} 条未读` : "消息已读完"}</span><button class="button button-small" type="button" data-message-settings>私信设置</button></div></header>
-      <div class="messages-layout" style="margin-top:28px">
+      <div class="messages-layout ${window.matchMedia("(max-width: 767px)").matches && mobileChatOpen ? "is-chat-open" : ""}" style="margin-top:28px">
         <aside class="conversation-list"><div class="conversation-list-head"><strong>会话</strong><label class="search-box"><input id="conversation-search" type="search" placeholder="搜索作者"></label></div><div id="conversation-items">${visible.map(conversationItem).join("") || '<div class="empty">暂无会话</div>'}</div></aside>
         <section class="chat-panel">${current ? chatPanel(current) : '<div class="empty">从一个作者主页发起私信，开始第一次交流。</div>'}</section>
       </div></div>`;
@@ -595,7 +618,7 @@
   function chatPanel(conversation) {
     const author = authorById(conversation.userId) || { name: "未知用户" };
     const blocked = state.blocked.includes(author.id);
-    return `<header class="chat-head"><div><strong>${escapeHtml(author.name)}</strong><small>${blocked ? "已拉黑，暂不能发送消息" : "私信内容仅双方可见"}</small></div><div class="chat-tools"><button class="button button-small" type="button" data-block="${conversation.id}">${blocked ? "解除拉黑" : "拉黑"}</button><button class="button button-small" type="button" data-report-conversation="${conversation.id}">举报</button><button class="button button-small" type="button" data-delete-conversation="${conversation.id}">删除会话</button></div></header>
+    return `<header class="chat-head"><button class="button button-small chat-back" type="button" data-chat-back>← 返回</button><div><strong>${escapeHtml(author.name)}</strong><small>${blocked ? "已拉黑，暂不能发送消息" : "私信内容仅双方可见"}</small></div><div class="chat-tools"><button class="button button-small" type="button" data-block="${conversation.id}">${blocked ? "解除拉黑" : "拉黑"}</button><button class="button button-small" type="button" data-report-conversation="${conversation.id}">举报</button><button class="button button-small" type="button" data-delete-conversation="${conversation.id}">删除会话</button></div></header>
       <div class="chat-body" id="chat-body">${conversation.messages.map((message) => messageItem(conversation, message)).join("") || '<div class="empty">还没有消息，先说一句你好。</div>'}</div>
       <form class="chat-form" id="chat-form">${replyTo ? `<div class="reply-preview"><span>回复：${escapeHtml(findMessage(conversation, replyTo)?.text || "")}</span><button type="button" data-cancel-reply>取消</button></div>` : ""}<div class="form-row" style="margin:0"><input class="input" name="message" maxlength="1000" autocomplete="off" placeholder="${blocked ? "已拉黑该用户" : "输入消息……"}" ${blocked ? "disabled" : ""}><button class="button button-primary" type="submit" ${blocked ? "disabled" : ""}>发送</button></div></form>`;
   }
@@ -621,6 +644,7 @@
     document.querySelectorAll("[data-conversation]").forEach((button) => button.addEventListener("click", async () => {
       activeConversation = button.dataset.conversation;
       replyTo = null;
+      mobileChatOpen = true;
       await performAction(`/api/conversations/${numericId(activeConversation)}/read`, {}, "", () => renderMessages());
     }));
     document.querySelector("#chat-form")?.addEventListener("submit", async (event) => {
@@ -632,6 +656,7 @@
       replyTo = null;
       await performAction(`/api/conversations/${conversationId}/messages`, { text, replyTo: reply || "" }, "", () => renderMessages());
     });
+    document.querySelector("[data-chat-back]")?.addEventListener("click", () => { mobileChatOpen = false; renderMessages(); });
     document.querySelector("[data-cancel-reply]")?.addEventListener("click", () => { replyTo = null; renderMessages(); });
     document.querySelectorAll("[data-reply]").forEach((button) => button.addEventListener("click", () => { replyTo = button.dataset.reply; renderMessages(); }));
     document.querySelectorAll("[data-copy-message]").forEach((button) => button.addEventListener("click", async () => {
@@ -1141,6 +1166,8 @@
     if (target.matches("[data-profile-tab]")) { profileTab = target.dataset.profileTab; return renderProfile(); }
     if (target.matches("[data-logout]")) return logoutAccount();
     if (target.matches("[data-open-settings]")) return openSettings();
+    if (target.matches("[data-nav-notify]")) return renderNotifications();
+    if (target.matches("[data-nav-profile]")) return openProfile();
     if (target.matches("[data-close-modal], #modal-close")) return closeModal();
     if (target.matches("[data-edit-work]")) return openPublish(target.dataset.editWork);
     if (target.matches("[data-rank-period]")) { rankingPeriod = target.dataset.rankPeriod; return renderRanking(); }
@@ -1171,11 +1198,19 @@
     if (target.matches("[data-activity]")) { const activity = byId(target.dataset.activity, state.activities); return openModal(activity.title, `<p>${escapeHtml(activity.desc)}</p><p class="muted">活动时间：${escapeHtml(activity.date)} · 当前状态：${escapeHtml(activity.status)}。报名通知会出现在站内消息中。</p>`); }
   });
 
+  document.querySelector("#nav-toggle")?.addEventListener("click", () => setNavOpen(!document.body.classList.contains("nav-open")));
+  document.querySelector("#nav-backdrop")?.addEventListener("click", () => closeNav());
+  document.querySelector("#site-nav")?.addEventListener("click", (event) => { if (event.target.closest("button")) closeNav(); });
+  window.addEventListener("resize", () => { if (window.innerWidth > 980) closeNav(); });
   document.querySelector("#publish-button").addEventListener("click", () => openPublish());
   document.querySelector("#notification-button").addEventListener("click", renderNotifications);
   document.querySelector("#user-button").addEventListener("click", openProfile);
   modalLayer.addEventListener("click", (event) => { if (event.target === modalLayer) closeModal(); });
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !modalLayer.hidden) closeModal(); });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!modalLayer.hidden) closeModal();
+    closeNav();
+  });
   window.addEventListener("hashchange", () => { route = location.hash.replace(/^#\/?/, "") || "home"; render(); });
   applyTheme(localStorage.getItem(THEME_KEY) || "qingli");
   (async () => {
