@@ -630,3 +630,28 @@ html, body { overflow-x: hidden; }
   .rank-tabs { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 4px; }
   .rank-tabs button { flex: 0 0 auto; }
 }
+
+
+/* --- 每周话题 --- */
+.topic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 18px; }
+.topic-card { display: flex; flex-direction: column; gap: 12px; padding: 22px; border: 1px solid var(--modal-border); border-radius: var(--modal-radius); background: linear-gradient(160deg, var(--modal-glass), var(--modal-glass-alt)); box-shadow: var(--shadow); backdrop-filter: blur(16px); }
+.topic-card h3 { margin: 0; font-family: var(--serif); font-size: 21px; }
+.topic-card p { margin: 0; color: var(--ink-soft); line-height: 1.75; }
+.topic-card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.topic-count { color: var(--ink-soft); font-size: 12px; }
+.topic-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--ink-soft); font-size: 12px; }
+.topic-meta-wide { justify-content: space-between; padding: 16px 20px; border: 1px solid var(--modal-border); border-radius: 16px; background: var(--control-glass); }
+.topic-card .button { align-self: flex-start; }
+
+/* --- 头像与表单提示 --- */
+.avatar { overflow: hidden; }
+.avatar img, .profile-avatar img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.field-note { margin: 6px 0 0; color: var(--ink-soft); font-size: 12px; }
+.admin-row-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+
+@media (max-width: 680px) {
+  .topic-grid { grid-template-columns: 1fr; }
+  .topic-meta-wide { flex-direction: column; }
+  .admin-row { flex-direction: column; align-items: flex-start; }
+  .admin-row-actions { justify-content: flex-start; }
+}

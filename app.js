@@ -12,7 +12,7 @@
   };
   const THEME_KEY = "fangfei_theme_v1";
   const DEFAULT_RANKING_WEIGHTS = Object.freeze({ views: 1, likes: 8, favorites: 10, comments: 4 });
-  const DATA_VERSION = 6;
+  const DATA_VERSION = 7;
   const EMPTY_STATE = {
     schemaVersion: DATA_VERSION,
     currentUser: { id: "", name: "访客", role: "guest" },
@@ -35,6 +35,9 @@
     users: [],
     adminRoles: [],
     adminTransfers: [],
+    topics: [],
+    riskEvents: [],
+    plagiarismFlags: [],
     rankings: {},
     rankingWeights: { ...DEFAULT_RANKING_WEIGHTS }
   };
@@ -48,6 +51,7 @@
   let replyTo = null;
   let adminTab = "概览";
   let profileTab = "works";
+  let publishTopicId = "";
   let rankingPeriod = "month";
   let rankingBoard = "works";
   let rankingAuthorMetric = "works";
@@ -132,7 +136,20 @@
   const publicWorks = () => state.works.filter(isPublishedWork);
   const myWorks = () => state.works.filter((work) => work.createdBy === currentUserId());
   const userById = (id) => state.users.find((user) => user.id === id) || null;
-  const avatarHtml = (user, className = "avatar") => `<span class="${className}">${escapeHtml(String(user?.avatar || user?.name || "芳").slice(0, 2))}</span>`;
+  const avatarHtml = (user, className = "avatar") => {
+    const source = String(user?.avatar || "");
+    if (source.startsWith("/avatars/")) return `<span class="${className}"><img src="${escapeHtml(source)}" alt="" loading="lazy"></span>`;
+    return `<span class="${className}">${escapeHtml(String(source || user?.name || "芳").slice(0, 2))}</span>`;
+  };
+  const topicById = (id) => state.topics.find((topic) => topic.id === id) || null;
+  const topicStatusLabel = (status) => ({ DRAFT: "草稿", PUBLISHED: "进行中", ENDED: "已结束", ARCHIVED: "已归档" }[status] || status || "未知");
+  const topicRemaining = (topic) => {
+    if (!topic.endMs) return "未设置截止时间";
+    const diff = topic.endMs - Date.now();
+    if (diff <= 0) return "已截止";
+    const days = Math.floor(diff / 86400000);
+    return days >= 1 ? `剩余 ${days} 天` : `剩余 ${Math.max(1, Math.floor(diff / 3600000))} 小时`;
+  };
   const statusLabel = (status) => ({ draft: "草稿", pending: "审核中", published: "已发布", rejected: "未通过", hidden: "已下架" }[status] || status || "未知");
   const worksByAuthor = (name) => state.works.filter((work) => work.author === name && isPublishedWork(work));
   const readingMinutes = (work) => Math.max(1, Math.round((work.body || []).join("").length / 420));
@@ -268,7 +285,7 @@
   function openProfileEditor() {
     const user = state.currentUser;
     const genres = Array.isArray(user.genres) ? user.genres : [];
-    openModal("编辑个人资料", `<form id="profile-form"><div class="form-grid"><div class="field"><label>笔名</label><input class="input" name="displayName" maxlength="40" value="${escapeHtml(user.name)}" required autofocus></div><div class="field"><label>头像文字</label><input class="input" name="avatar" maxlength="4" value="${escapeHtml(user.avatar || "")}" placeholder="1-2 个字"></div></div><div class="field"><label>个人简介</label><textarea class="textarea" name="bio" maxlength="300" placeholder="介绍你的写作与兴趣">${escapeHtml(user.bio || "")}</textarea></div><div class="field"><label>背景图</label><select class="select" name="coverTheme"><option value="">默认背景</option>${Object.entries(THEMES).map(([id, theme]) => `<option value="${id}" ${user.coverTheme === id ? "selected" : ""}>${escapeHtml(theme.name)}</option>`).join("")}</select></div><div class="field"><label>文学偏好</label><textarea class="textarea" name="preferences" maxlength="500" placeholder="例如：偏爱安静、克制、带有现实质感的叙事">${escapeHtml(user.preferences || "")}</textarea></div><div class="field"><label>擅长类型</label><div class="choice-grid">${categories.slice(1).map((category) => `<label><input type="checkbox" name="genres" value="${category}" ${genres.includes(category) ? "checked" : ""}> ${category}</label>`).join("")}</div></div></form>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-primary" type="button" id="save-profile">保存资料</button></div>');
+    openModal("编辑个人资料", `<form id="profile-form"><div class="form-grid"><div class="field"><label>笔名</label><input class="input" name="displayName" maxlength="40" value="${escapeHtml(user.name)}" required autofocus></div><div class="field"><label>头像文字</label><input class="input" name="avatar" maxlength="4" value="${escapeHtml(String(user.avatar || "").startsWith("/avatars/") ? "" : (user.avatar || ""))}" placeholder="1-2 个字"></div></div><div class="field"><label>上传头像</label><input class="input" type="file" id="avatar-file" accept="image/jpeg,image/png,image/webp"><small class="field-note">支持 JPG、PNG、WEBP，最大 5MB，服务器统一裁剪为 512×512。</small></div><div class="field"><label>个人简介</label><textarea class="textarea" name="bio" maxlength="300" placeholder="介绍你的写作与兴趣">${escapeHtml(user.bio || "")}</textarea></div><div class="field"><label>背景图</label><select class="select" name="coverTheme"><option value="">默认背景</option>${Object.entries(THEMES).map(([id, theme]) => `<option value="${id}" ${user.coverTheme === id ? "selected" : ""}>${escapeHtml(theme.name)}</option>`).join("")}</select></div><div class="field"><label>文学偏好</label><textarea class="textarea" name="preferences" maxlength="500" placeholder="例如：偏爱安静、克制、带有现实质感的叙事">${escapeHtml(user.preferences || "")}</textarea></div><div class="field"><label>擅长类型</label><div class="choice-grid">${categories.slice(1).map((category) => `<label><input type="checkbox" name="genres" value="${category}" ${genres.includes(category) ? "checked" : ""}> ${category}</label>`).join("")}</div></div></form>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-primary" type="button" id="save-profile">保存资料</button></div>');
     document.querySelector("#save-profile").addEventListener("click", async () => {
       const form = document.querySelector("#profile-form");
       if (!form.reportValidity()) return;
@@ -281,6 +298,23 @@
         preferences: String(data.get("preferences") || "").trim(),
         genres: data.getAll("genres")
       }, "个人资料已保存", () => { closeModal(); render(); });
+    });
+    document.querySelector("#avatar-file")?.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const form = new FormData();
+      form.append("avatar", file);
+      try {
+        const response = await fetch("/api/profile/avatar", { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken }, body: form });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || "头像上传失败");
+        applyBootstrap(payload);
+        showToast("头像已更新");
+        closeModal();
+        render();
+      } catch (error) {
+        showToast(error?.message || "头像上传失败");
+      }
     });
   }
 
@@ -395,7 +429,7 @@
     const favorites = Number(work.favorites) || 0;
     const comments = Array.isArray(work.comments) ? work.comments.length : 0;
     return `<article class="work-card ${featured ? "is-featured" : ""}">
-      <div class="work-card-top"><span class="work-category">${escapeHtml(work.category || "未分类")}</span>${work.status !== "published" ? `<span class="work-flag">${escapeHtml(statusLabel(work.status))}</span>` : featured ? '<span class="work-flag">本月优秀</span>' : ""}</div>
+      <div class="work-card-top"><span class="work-category">${escapeHtml(work.category || "未分类")}</span>${work.visibility === "PRIVATE" ? '<span class="work-flag">私密投稿</span>' : work.status !== "published" ? `<span class="work-flag">${escapeHtml(statusLabel(work.status))}</span>` : featured ? '<span class="work-flag">本月优秀</span>' : ""}</div>
       <button class="work-card-title work-title-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button>
       <p class="work-excerpt">${escapeHtml(work.excerpt || (work.body || []).join("").slice(0, 110))}</p>
       ${tags.length ? `<div class="tag-row">${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
@@ -749,9 +783,34 @@
     app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">把写作带到现场</p><h1 class="page-title">文学活动</h1></div><p class="page-note">共读、写作实验室和改稿会。</p></header>${state.activities.length ? `<div class="activity-grid" style="margin-top:28px">${state.activities.map(activityCard).join("")}</div>` : '<div class="empty compact-empty">暂无已发布活动。</div>'}</div>`;
   }
 
+  function topicCard(topic) {
+    return `<article class="topic-card"><div class="topic-card-top"><span class="work-category">${escapeHtml(topicStatusLabel(topic.status))}</span><span class="topic-count">${topic.submissions} 篇投稿</span></div><h3>${escapeHtml(topic.title)}</h3><p>${escapeHtml(topic.description || "暂无话题说明。")}</p><div class="topic-meta"><span>${escapeHtml(topic.startAt || "待定")} 至 ${escapeHtml(topic.endAt || "待定")}</span><span>${escapeHtml(topicRemaining(topic))}</span></div><button class="button button-small button-primary" type="button" data-topic="${topic.id}">查看话题</button></article>`;
+  }
+
+  function renderTopics() {
+    const topics = state.topics.filter((topic) => topic.status !== "DRAFT");
+    app.innerHTML = `<div class="page">
+      <header class="page-head"><div><p class="eyebrow">每周投稿话题</p><h1 class="page-title">话题</h1></div><p class="page-note">按周参与集体写作，投稿时选择对应话题即可归入当期。</p></header>
+      ${topics.length ? `<div class="topic-grid">${topics.map(topicCard).join("")}</div>` : '<div class="empty">暂无公开话题，等待编辑部发布。</div>'}
+    </div>`;
+  }
+
+  function renderTopic(id) {
+    const topic = topicById(id);
+    if (!topic) return renderMissing("话题不存在或尚未公开");
+    const submissions = state.works.filter((work) => work.topicId === topic.id && work.status === "published" && work.visibility !== "PRIVATE");
+    const mine = state.works.filter((work) => work.topicId === topic.id && work.createdBy === currentUserId());
+    app.innerHTML = `<div class="page">
+      <header class="page-head"><div><p class="eyebrow">每周投稿话题</p><h1 class="page-title">${escapeHtml(topic.title)}</h1><p class="page-note">${escapeHtml(topic.description || "暂无话题说明。")}</p></div><button class="button button-quiet" type="button" data-route="topics">返回话题列表</button></header>
+      <section class="section"><div class="topic-meta topic-meta-wide"><span>开始：${escapeHtml(topic.startAt || "待定")}</span><span>截止：${escapeHtml(topic.endAt || "待定")}</span><span>${escapeHtml(topicRemaining(topic))}</span><span>${topic.submissions} 篇投稿</span></div>
+      <div class="hero-actions"><button class="button button-primary" type="button" data-publish-topic="${topic.id}">投稿到本期</button>${mine.length ? `<span class="muted">你已投稿 ${mine.length} 篇</span>` : ""}</div></section>
+      <section class="section"><div class="section-head"><div><p class="eyebrow">本期投稿</p><h2 class="section-title">全部投稿</h2></div></div>${submissions.length ? `<div class="work-grid">${submissions.map(workCard).join("")}</div>` : '<div class="empty compact-empty">本期暂无公开投稿。</div>'}</section>
+    </div>`;
+  }
+
   function renderAdmin() {
     if (!isAdmin()) return renderMissing("需要管理员权限才能进入管理后台");
-    const tabs = ["概览", "作品审核", "评论管理", "私信举报", "用户管理", "月度评选", "文学活动", "公告", "Agent 审核", "安全日志"];
+    const tabs = ["概览", "作品审核", "评论管理", "私信举报", "用户管理", "月度评选", "文学活动", "每周话题", "公告", "风控", "Agent 审核", "安全日志"];
     if (isSuperAdmin()) tabs.splice(5, 0, "管理员管理");
     if (!tabs.includes(adminTab)) adminTab = "概览";
     app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">运营控制台</p><h1 class="page-title">管理后台</h1><p class="page-note">服务端校验高级管理员与超级管理员权限，前端只负责显示可执行操作。</p></div></header><nav class="admin-tabs">${tabs.map((tab) => `<button class="${adminTab === tab ? "is-active" : ""}" type="button" data-admin-tab="${tab}">${tab}</button>`).join("")}</nav><section id="admin-content">${adminContent()}</section></div>`;
@@ -795,6 +854,36 @@
     document.querySelectorAll("[data-revoke-admin]").forEach((button) => button.addEventListener("click", async () => {
       if (!await confirmDialog("确定撤销该高级管理员吗？")) return;
       await performAction("/api/admin/admins/revoke", { userId: button.dataset.revokeAdmin }, "高级管理员已撤销", () => renderAdmin());
+    }));
+    document.querySelector("#admin-topic-form")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      await performAction("/api/admin/topics", {
+        topicId: String(data.get("topicId") || ""),
+        title: String(data.get("title") || "").trim(),
+        description: String(data.get("description") || "").trim(),
+        startAt: String(data.get("startAt") || ""),
+        endAt: String(data.get("endAt") || ""),
+        status: String(data.get("status") || "DRAFT")
+      }, "话题已保存", () => renderAdmin());
+    });
+    document.querySelectorAll("[data-topic-edit]").forEach((button) => button.addEventListener("click", () => {
+      const topic = topicById(button.dataset.topicEdit);
+      const form = document.querySelector("#admin-topic-form");
+      if (!topic || !form) return;
+      form.topicId.value = topic.id;
+      form.title.value = topic.title;
+      form.description.value = topic.description || "";
+      form.status.value = topic.status;
+      form.startAt.value = String(topic.startAt || "").slice(0, 10);
+      form.endAt.value = String(topic.endAt || "").slice(0, 10);
+      form.querySelector('[type="submit"]').textContent = "更新话题";
+    }));
+    document.querySelectorAll("[data-topic-status]").forEach((button) => button.addEventListener("click", async () => {
+      await performAction(`/api/admin/topics/${numericId(button.dataset.topicStatus)}/status`, { status: button.dataset.status }, "话题状态已更新", () => renderAdmin());
+    }));
+    document.querySelectorAll("[data-risk-action]").forEach((button) => button.addEventListener("click", async () => {
+      await performAction(`/api/admin/risk/${numericId(button.dataset.riskAction)}`, { action: button.dataset.action }, "风控记录已处理", () => renderAdmin());
     }));
     document.querySelector("#admin-award-form")?.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -853,6 +942,8 @@
     if (adminTab === "管理员管理") return `<div class="panel admin-panel"><h2 class="section-title">高级管理员设置</h2><p class="muted">超级管理员最多任命 2 名高级管理员，名额限制由服务端强制校验。</p><div class="admin-form-grid"><form id="admin-appoint-form" class="admin-form"><h3>任命高级管理员</h3><div class="field"><label>普通用户</label><select class="select" name="userId">${userRows.filter((user) => !user.adminLevel && user.role !== "admin").map((user) => `<option value="${user.id}">${escapeHtml(user.name)}</option>`).join("") || '<option value="">暂无可任命用户</option>'}</select></div><button class="button button-primary" type="submit">任命</button></form><form id="admin-transfer-form" class="admin-form"><h3>转移高级管理员</h3><div class="field"><label>原高级管理员</label><select class="select" name="oldAdminId">${state.adminRoles.filter((role) => role.level === "senior").map((role) => `<option value="${role.userId}">${escapeHtml(role.name || role.userId)}</option>`).join("") || '<option value="">暂无高级管理员</option>'}</select></div><div class="field"><label>接任普通用户</label><select class="select" name="newAdminId">${userRows.filter((user) => !user.adminLevel && user.role !== "admin").map((user) => `<option value="${user.id}">${escapeHtml(user.name)}</option>`).join("") || '<option value="">暂无可接任用户</option>'}</select></div><div class="field"><label>转交原因</label><input class="input" name="reason" maxlength="300" required placeholder="填写转交原因"></div><button class="button button-primary" type="submit">转交权限</button></form></div><h3 class="section-title">当前管理员</h3><ul class="admin-list">${state.adminRoles.map((role) => `<li class="admin-row"><span><strong>${escapeHtml(role.name || role.userId)}</strong><small class="admin-note">${escapeHtml(role.level === "super" ? "超级管理员" : "高级管理员")} · 任命于 ${escapeHtml(role.appointedAt)}</small></span>${role.level === "senior" && isSuperAdmin() ? `<button class="button button-small button-danger" type="button" data-revoke-admin="${role.userId}">撤销</button>` : '<span class="status-pill">最高权限</span>'}</li>`).join("")}</ul><h3 class="section-title">权限转交记录</h3><ul class="admin-list">${state.adminTransfers.length ? state.adminTransfers.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.oldName || item.oldAdminId)} → ${escapeHtml(item.newName || item.newAdminId)}</strong><small class="admin-note">${escapeHtml(item.reason)} · 操作人 ${escapeHtml(item.operatorName || item.operatorId)} · ${escapeHtml(item.at)}</small></span></li>`).join("") : '<li class="empty">暂无转交记录。</li>'}</ul></div>`;
     if (adminTab === "月度评选") { const publicOptions = state.works.filter(isPublishedWork); return `<div class="panel admin-panel"><h2 class="section-title">月度优秀评选</h2><p class="muted">只允许公开作品进入候选池。获奖记录会保存月份、类别、评选人、时间和推荐理由。</p><form id="admin-award-form" class="award-form"><div class="form-grid"><div class="field"><label>月份</label><input class="input" type="month" name="month" value="${new Date().toISOString().slice(0, 7)}" required></div><div class="field"><label>作品</label><select class="select" name="workId" required>${publicOptions.map((work) => `<option value="${work.id}">${escapeHtml(work.title)} · ${escapeHtml(work.author)}</option>`).join("") || '<option value="">暂无公开作品</option>'}</select></div><div class="field"><label>名次</label><input class="input" type="number" name="rank" min="1" max="20" value="1" required></div></div><div class="field"><label>推荐理由</label><textarea class="textarea" name="reason" maxlength="300" placeholder="说明该作品的文学价值或评选理由"></textarea></div><button class="button button-primary" type="submit">保存评选</button></form><h3 class="section-title">正式获奖记录</h3><ul class="admin-list">${activeAwards.length ? activeAwards.map((award) => `<li class="admin-row"><span><strong>${escapeHtml(award.month)} · ${escapeHtml(workById(award.workId)?.title || "作品")}</strong><small class="admin-note">${escapeHtml(award.category || "综合")} · 第 ${award.rank} 名 · ${escapeHtml(award.reason || "暂无推荐理由")} · 由 ${escapeHtml(award.selectedByName || "管理员")} 评选</small></span><button class="button button-small button-danger" type="button" data-revoke-award="${award.id}">撤销</button></li>`).join("") : '<li class="empty">暂无月度优秀记录。</li>'}</ul></div>`; }
     if (adminTab === "文学活动") return `<div class="panel admin-panel"><h2 class="section-title">文学活动</h2><form id="admin-activity-form" class="admin-form"><div class="form-grid"><div class="field"><label>活动名称</label><input class="input" name="title" maxlength="80" required></div><div class="field"><label>状态</label><select class="select" name="status">${["筹备中", "报名中", "进行中", "已结束"].map((status) => `<option>${status}</option>`).join("")}</select></div><div class="field"><label>开始时间</label><input class="input" type="date" name="startsAt"></div><div class="field"><label>截止时间</label><input class="input" type="date" name="endsAt"></div></div><div class="field"><label>活动介绍</label><textarea class="textarea" name="description" maxlength="1000"></textarea></div><div class="field"><label>活动规则</label><textarea class="textarea" name="rules" maxlength="1000"></textarea></div><button class="button button-primary" type="submit">创建活动</button></form><ul class="admin-list">${state.activities.length ? state.activities.map((activity) => `<li class="admin-row"><span><strong>${escapeHtml(activity.title)}</strong><small class="admin-note">${escapeHtml(activity.desc)} · ${escapeHtml(activity.date || "时间待定")} · ${escapeHtml(activity.status)}</small></span></li>`).join("") : '<li class="empty">暂无活动。</li>'}</ul></div>`;
+    if (adminTab === "每周话题") return `<div class="panel admin-panel"><h2 class="section-title">每周投稿话题</h2><form id="admin-topic-form" class="admin-form"><input type="hidden" name="topicId" value=""><div class="form-grid"><div class="field"><label>话题标题</label><input class="input" name="title" maxlength="80" required></div><div class="field"><label>状态</label><select class="select" name="status">${["DRAFT", "PUBLISHED", "ENDED", "ARCHIVED"].map((value) => `<option value="${value}">${escapeHtml(topicStatusLabel(value))}</option>`).join("")}</select></div><div class="field"><label>开始时间</label><input class="input" type="date" name="startAt"></div><div class="field"><label>截止时间</label><input class="input" type="date" name="endAt"></div></div><div class="field"><label>话题说明</label><textarea class="textarea" name="description" maxlength="1000"></textarea></div><button class="button button-primary" type="submit">保存话题</button></form><ul class="admin-list">${state.topics.length ? state.topics.map((topic) => `<li class="admin-row"><span><strong>${escapeHtml(topic.title)}</strong><small class="admin-note">${escapeHtml(topicStatusLabel(topic.status))} · ${escapeHtml(topic.startAt || "待定")} 至 ${escapeHtml(topic.endAt || "待定")} · ${topic.submissions} 篇投稿</small></span><span class="admin-row-actions"><button class="button button-small" type="button" data-topic-edit="${topic.id}">编辑</button><button class="button button-small" type="button" data-topic-status="${topic.id}" data-status="PUBLISHED">发布</button><button class="button button-small" type="button" data-topic-status="${topic.id}" data-status="ENDED">结束</button><button class="button button-small button-quiet" type="button" data-topic-status="${topic.id}" data-status="ARCHIVED">归档</button></span></li>`).join("") : '<li class="empty">暂无话题。</li>'}</ul></div>`;
+    if (adminTab === "风控") return `<div class="panel admin-panel"><h2 class="section-title">异常行为与风控</h2><div class="admin-grid"><div class="metric"><strong>${state.riskEvents.filter((item) => item.status === "pending").length}</strong><span>待处理风险</span></div><div class="metric"><strong>${state.plagiarismFlags.length}</strong><span>疑似相似作品</span></div><div class="metric"><strong>${state.reports.filter((item) => String(item.reason || "").includes("版权")).length}</strong><span>版权举报</span></div></div>${state.plagiarismFlags.length ? `<h3 class="section-title">疑似相似作品</h3><ul class="admin-list">${state.plagiarismFlags.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.workTitle || "作品")}</strong><small class="admin-note">与《${escapeHtml(item.matchedTitle || "未知作品")}》相似度 ${item.score}% · ${escapeHtml(item.level)} · ${escapeHtml(item.at)}</small></span><button class="button button-small" type="button" data-work="${item.workId}">查看</button></li>`).join("")}</ul>` : ""}<h3 class="section-title">风险记录</h3><ul class="admin-list">${state.riskEvents.length ? state.riskEvents.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.userName)} · ${escapeHtml(item.kind)}</strong><small class="admin-note">${escapeHtml(item.level)} · ${escapeHtml(item.detail)} · ${escapeHtml(item.status)} · ${escapeHtml(item.at)}</small></span><span class="admin-row-actions"><button class="button button-small" type="button" data-risk-action="${item.id}" data-action="normal">标记正常</button><button class="button button-small" type="button" data-risk-action="${item.id}" data-action="excluded">排除统计</button><button class="button button-small" type="button" data-risk-action="${item.id}" data-action="restored">恢复统计</button><button class="button button-small button-quiet" type="button" data-risk-action="${item.id}" data-action="limited">限制互动</button></span></li>`).join("") : '<li class="empty">暂无风险记录。</li>'}</ul></div>`;
     if (adminTab === "公告") return `<div class="admin-announcement"><div class="field"><label>公告标题</label><input class="input" id="admin-ann-title" maxlength="80" placeholder="例如：十月共读会开始报名"></div><div class="field"><label>公告内容</label><textarea class="textarea" id="admin-ann-content" maxlength="1000" placeholder="填写需要告知全体用户的简短内容"></textarea></div><button class="button button-primary" type="button" id="admin-ann-create">发布公告</button></div><ul class="admin-list">${state.announcements.length ? state.announcements.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.title)}</strong><small class="admin-note">${escapeHtml(item.status === "published" ? "已发布" : "已归档")} · ${escapeHtml(item.content)}</small></span><button class="button button-small ${item.status === "published" ? "button-quiet" : "button-primary"}" type="button" data-ann-toggle="${item.id}">${item.status === "published" ? "撤回" : "发布"}</button></li>`).join("") : '<li class="empty">暂无公告。</li>'}</ul>`;
     if (adminTab === "Agent 审核") return `<div class="panel admin-panel"><div class="section-head"><h2 class="section-title">Agent 审核</h2><span class="status-pill">PASSIVE</span></div><div class="admin-grid"><div class="metric"><strong>${state.works.length + comments.length}</strong><span>公开内容队列</span></div><div class="metric"><strong>${state.reports.length}</strong><span>举报上下文</span></div><div class="metric"><strong>0</strong><span>自动处置</span></div></div><ul class="admin-list"><li class="admin-row"><span>风险分级<small class="admin-note">LOW · MEDIUM · HIGH · CRITICAL</small></span><span class="muted">等待审核</span></li><li class="admin-row"><span>最终动作<small class="admin-note">模型只输出结构化分析，管理员确认 ALLOW、REVIEW 或 BLOCK。</small></span><span class="muted">人工确认</span></li><li class="admin-row"><span>隐私边界<small class="admin-note">普通私信不扫描，只有举报消息和必要上下文进入审核。</small></span><span class="muted">已启用</span></li></ul></div>`;
     if (adminTab === "安全日志") return `<div class="panel admin-panel"><h2 class="section-title">操作与审核日志</h2><ul class="admin-list">${state.auditLogs.length ? state.auditLogs.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.actorName || "系统")}</strong><small class="admin-note">${escapeHtml(item.text)}</small></span><time class="muted">${escapeHtml(item.at)}</time></li>`).join("") : '<li class="empty">暂无操作记录。</li>'}</ul></div>`;
@@ -865,8 +956,9 @@
     performAction("/api/notifications/read", {}, "", () => renderHeader());
   }
 
-  function openPublish(workId = "") {
+  function openPublish(workId = "", topicId = "") {
     if (!ensureLoggedIn()) return;
+    publishTopicId = topicId ? String(topicId) : "";
     const targetId = workId ? String(workId) : "";
     const existing = targetId ? workById(targetId) : null;
     if (targetId && !existing) return showToast("作品不存在");
@@ -903,7 +995,9 @@
           </div>
           <aside class="publish-side">
             <section class="publish-card">
-              <div class="publish-section-head"><span>03</span><div><h3>投稿设置</h3><p>以下开关由服务端保存。</p></div></div>
+              <div class="publish-section-head"><span>03</span><div><h3>投稿设置</h3><p>可见性与互动开关由服务端保存。</p></div></div>
+              <div class="field"><label>作品可见性</label><select class="select" name="visibility"><option value="PUBLIC" ${existing?.visibility === "PRIVATE" ? "" : "selected"}>公开投稿</option><option value="PRIVATE" ${existing?.visibility === "PRIVATE" ? "selected" : ""}>私密投稿</option></select><p class="field-note">私密投稿不进入公开列表、搜索和排行榜，仅你本人与管理员可见。</p></div>
+              <div class="field"><label>投稿话题</label><select class="select" name="topicId"><option value="">不参与话题</option>${state.topics.filter((topic) => topic.status === "PUBLISHED").map((topic) => `<option value="${topic.id}" ${(existing?.topicId || publishTopicId) === topic.id ? "selected" : ""}>${escapeHtml(topic.title)}</option>`).join("")}</select></div>
               <label class="setting-row"><span><strong>公开展示</strong><small>审核通过后允许所有访客阅读。</small></span><input type="checkbox" name="isPublic" ${existing?.isPublic === false ? "" : "checked"}></label>
               <label class="setting-row"><span><strong>允许评论</strong><small>关闭后读者不能发表评论。</small></span><input type="checkbox" name="allowComments" ${existing?.allowComments === false ? "" : "checked"}></label>
               <label class="setting-row"><span><strong>允许收藏</strong><small>关闭后读者不能收藏作品。</small></span><input type="checkbox" name="allowFavorites" ${existing?.allowFavorites === false ? "" : "checked"}></label>
@@ -912,6 +1006,8 @@
               <div class="publish-section-head"><span>04</span><div><h3>原创声明</h3><p>确认后才能提交审核。</p></div></div>
               <label class="setting-row"><span><strong>原创与发表权确认</strong><small>我确认这是我的原创作品，或我拥有合法发表权。</small></span><input type="checkbox" name="originalConfirmed" ${existing?.originalConfirmed ? "checked" : ""}></label>
               <label class="setting-row"><span><strong>公开展示授权</strong><small>我同意芳菲文学社按照平台规则公开展示该作品。</small></span><input type="checkbox" name="rightsConfirmed" ${existing?.rightsConfirmed ? "checked" : ""}></label>
+              <label class="setting-row"><span><strong>本作品包含引用内容</strong><small>勾选后请在下方填写引用来源。</small></span><input type="checkbox" name="hasCitation" ${existing?.hasCitation ? "checked" : ""}></label>
+              <div class="field"><label>引用来源</label><textarea class="textarea" name="citationSources" maxlength="500" placeholder="作者、篇名、出版信息或链接">${escapeHtml(existing?.citationSources || "")}</textarea></div>
             </section>
             <div class="publish-page-actions"><button class="button" type="button" id="save-draft">保存草稿</button><button class="button button-primary" type="button" id="submit-review">提交审核</button></div>
           </aside>
@@ -940,7 +1036,11 @@
         allowComments: data.get("allowComments") === "on",
         allowFavorites: data.get("allowFavorites") === "on",
         originalConfirmed: data.get("originalConfirmed") === "on",
-        rightsConfirmed: data.get("rightsConfirmed") === "on"
+        rightsConfirmed: data.get("rightsConfirmed") === "on",
+        visibility: String(data.get("visibility") || "PUBLIC"),
+        topicId: String(data.get("topicId") || ""),
+        hasCitation: data.get("hasCitation") === "on",
+        citationSources: String(data.get("citationSources") || "").trim()
       };
       const path = existing ? `/api/works/${numericId(existing.id)}` : "/api/works";
       await performAction(path, payload, action === "draft" ? "草稿已保存" : "作品已提交审核", () => { profileTab = "works"; setRoute("profile"); });
@@ -976,16 +1076,18 @@
     if (!ensureLoggedIn()) return;
     const work = workById(workId);
     if (!work) return;
-    const reasons = ["内容侵权", "色情或低俗内容", "暴力或威胁", "违法内容", "垃圾信息", "其他"];
-    openModal("举报作品", `<p>举报只提交作品和必要说明。</p><form id="report-work-form"><div class="field"><label>举报原因</label><select class="select" name="reason">${reasons.map((reason) => `<option>${reason}</option>`).join("")}</select></div><div class="field"><label>补充说明</label><textarea class="textarea" name="detail" maxlength="500" placeholder="可补充具体情况"></textarea></div></form>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-danger" type="button" id="submit-work-report">提交举报</button></div>');
+    const reasons = ["版权 / 疑似抄袭", "内容侵权", "色情或低俗内容", "暴力或威胁", "违法内容", "垃圾信息", "其他"];
+    openModal("举报作品", `<p>举报只提交作品和必要说明。</p><form id="report-work-form"><div class="field"><label>举报原因</label><select class="select" name="reason">${reasons.map((reason) => `<option>${reason}</option>`).join("")}</select></div><div class="field"><label>疑似原文链接</label><input class="input" type="url" name="suspectedOriginalUrl" maxlength="300" placeholder="版权或抄袭举报时填写"></div><div class="field"><label>补充说明</label><textarea class="textarea" name="detail" maxlength="500" placeholder="可补充具体情况"></textarea></div></form>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-danger" type="button" id="submit-work-report">提交举报</button></div>');
     document.querySelector("#submit-work-report").addEventListener("click", async () => {
       const data = new FormData(document.querySelector("#report-work-form"));
+      const reason = String(data.get("reason") || "");
       await performAction("/api/reports", {
-        type: "作品",
+        type: reason.includes("版权") ? "版权举报" : "作品",
         targetId: work.id,
         target: work.title,
-        reason: String(data.get("reason") || ""),
+        reason,
         detail: String(data.get("detail") || ""),
+        suspectedOriginalUrl: String(data.get("suspectedOriginalUrl") || ""),
         message: ""
       }, "举报已提交", () => closeModal());
     });
@@ -1006,6 +1108,8 @@
     if (route === "monthly") return renderMonthly();
     if (route === "ranking") return renderRanking();
     if (route === "activities") return renderActivities();
+    if (route === "topics") return renderTopics();
+    if (route.startsWith("topic/")) return renderTopic(route.split("/")[1]);
     if (route === "profile") return renderProfile();
     if (route === "publish") return renderPublish();
     if (route.startsWith("publish/")) return renderPublish(route.split("/")[1]);
@@ -1047,6 +1151,8 @@
     if (target.matches("[data-favorite-work]")) return toggleWorkFavorite(target.dataset.favoriteWork);
     if (target.matches("[data-share-work]")) return shareWork(target.dataset.shareWork);
     if (target.matches("[data-report-work]")) return reportWorkDialog(target.dataset.reportWork);
+    if (target.matches("[data-topic]")) return setRoute(`topic/${target.dataset.topic}`);
+    if (target.matches("[data-publish-topic]")) return openPublish("", target.dataset.publishTopic);
     if (target.matches("[data-work]")) return setRoute(`work/${target.dataset.work}`);
     if (target.matches("[data-author]")) return setRoute(`author/${target.dataset.author}`);
     if (target.matches("[data-message-author]")) return startConversation(target.dataset.messageAuthor);
