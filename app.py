@@ -427,7 +427,7 @@ SCHEMA_PG += "\nCREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON us
 
 AUTO_ID_TABLES = {
     "users", "admin_transfers", "works", "work_views", "comments", "activities",
-    "announcements", "monthly_picks", "monthly_awards", "conversations", "messages",
+    "announcements", "monthly_awards", "conversations", "messages",
     "notifications", "reports", "audit_logs", "topics", "risk_events", "plagiarism_checks",
     "agent_runs", "agent_moderation_results", "agent_review_tasks",
 }
@@ -548,6 +548,7 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
             "cover_theme": "TEXT NOT NULL DEFAULT ''",
             "literary_preferences": "TEXT NOT NULL DEFAULT ''",
             "genres_json": "TEXT NOT NULL DEFAULT '[]'",
+            "risk_level": "TEXT NOT NULL DEFAULT 'LOW'",
         },
         "works": {
             "is_public": "INTEGER NOT NULL DEFAULT 1",
@@ -562,7 +563,6 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
         },
         "likes": {"effective": "INTEGER NOT NULL DEFAULT 1"},
         "comments": {"effective": "INTEGER NOT NULL DEFAULT 1"},
-        "users": {"risk_level": "TEXT NOT NULL DEFAULT 'LOW'"},
         "reports": {
             "suspected_original_url": "TEXT NOT NULL DEFAULT ''",
             "handled_action": "TEXT NOT NULL DEFAULT ''",
