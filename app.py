@@ -2280,6 +2280,21 @@ def update_work(work_id: int):
     return save_work(work_id)
 
 
+@app.post("/api/works/<int:work_id>/delete")
+@require_auth
+def delete_own_work(work_id: int):
+    db = get_db()
+    work = db.execute("SELECT * FROM works WHERE id = ? AND author_id = ?", (work_id, g.user["id"])).fetchone()
+    if not work:
+        return json_error("作品不存在或无权删除", 404)
+    if work["status"] not in {"draft", "rejected"}:
+        return json_error("只有草稿或未通过的作品可以由作者删除", 409)
+    db.execute("DELETE FROM works WHERE id = ? AND author_id = ?", (work_id, g.user["id"]))
+    audit("删除作品", "work", str(work_id), f"作者删除作品《{work['title']}》", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
 def public_work(work_id: int):
     work = get_work(work_id)
     if not work or work["status"] != "published" or not bool(row_value(work, "is_public", 1)):
@@ -2734,6 +2749,18 @@ def toggle_announcement(announcement_id: int):
     return json_ok(bootstrap_payload())
 
 
+@app.post("/api/admin/announcements/<int:announcement_id>/delete")
+@require_admin
+def delete_announcement(announcement_id: int):
+    row = get_db().execute("SELECT * FROM announcements WHERE id = ?", (announcement_id,)).fetchone()
+    if not row:
+        return json_error("公告不存在", 404)
+    get_db().execute("DELETE FROM announcements WHERE id = ?", (announcement_id,))
+    audit("删除公告", "announcement", str(announcement_id), f"删除公告《{row['title']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
 @app.post("/api/admin/works/<int:work_id>/review")
 @require_admin
 def review_work(work_id: int):
@@ -2760,6 +2787,24 @@ def review_work(work_id: int):
     notify(work["author_id"], f"作品《{work['title']}》{label}。" + (f" 审核意见：{note}" if note else ""), "work", f"#/work/w{work_id}")
     audit(label, "work", str(work_id), f"{label}《{work['title']}》", g.user["id"])
     get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/works/<int:work_id>/delete")
+@require_admin
+def delete_work(work_id: int):
+    work = get_db().execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
+    if not work:
+        return json_error("作品不存在", 404)
+    db = get_db()
+    db.execute("DELETE FROM works WHERE id = ?", (work_id,))
+    db.execute(
+        "UPDATE reports SET status = '已处理', handled_at = ?, handled_by = ? WHERE target_id IN (?, ?) AND status <> '已处理'",
+        (now_ms(), g.user["id"], str(work_id), f"w{work_id}"),
+    )
+    notify(work["author_id"], f"作品《{work['title']}》已被管理员删除。", "work")
+    audit("删除作品", "work", str(work_id), f"删除作品《{work['title']}》", g.user["id"])
+    db.commit()
     return json_ok(bootstrap_payload())
 
 
