@@ -1,15 +1,21 @@
 import json, os, sys, tempfile, pathlib
 
-db_path = pathlib.Path(tempfile.gettempdir()) / f"ff_v21_verify_{os.getpid()}.sqlite3"
-for suffix in ("", "-wal", "-shm"):
-    p = pathlib.Path(str(db_path) + suffix)
-    if p.exists():
-        p.unlink()
-
-os.environ["DATABASE_PATH"] = str(db_path)
+pg_url = os.getenv("FF_VERIFY_DATABASE_URL", "").strip()
+if pg_url:
+    # 对照真实 PostgreSQL 运行时验证
+    os.environ["DATABASE_URL"] = pg_url
+    os.environ.pop("DATABASE_PATH", None)
+else:
+    db_path = pathlib.Path(tempfile.gettempdir()) / f"ff_v21_verify_{os.getpid()}.sqlite3"
+    for suffix in ("", "-wal", "-shm"):
+        p = pathlib.Path(str(db_path) + suffix)
+        if p.exists():
+            p.unlink()
+    os.environ["DATABASE_PATH"] = str(db_path)
 os.environ["FLASK_ENV"] = "development"
 os.environ.pop("RENDER", None)
-os.environ.pop("DATABASE_URL", None)
+if not pg_url:
+    os.environ.pop("DATABASE_URL", None)
 os.environ["ADMIN_USERNAME"] = "superboss"
 os.environ["ADMIN_PASSWORD"] = "VerifyPass12345"
 os.environ["ADMIN_DISPLAY_NAME"] = "超级管理员"

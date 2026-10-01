@@ -423,6 +423,8 @@ SCHEMA_PG = (
     .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
     .replace(" COLLATE NOCASE", "")
 )
+# 毫秒时间戳超出 PostgreSQL INTEGER 范围，剩余整型列统一提升为 BIGINT
+SCHEMA_PG = re.sub(r"\bINTEGER\b", "BIGINT", SCHEMA_PG)
 SCHEMA_PG += "\nCREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username));\n"
 
 AUTO_ID_TABLES = {
