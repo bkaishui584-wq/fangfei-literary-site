@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, abort, g, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, g, jsonify, request, send_from_directory
 from PIL import Image, ImageOps
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -26,7 +26,6 @@ IS_PRODUCTION = os.getenv("FLASK_ENV", "").lower() == "production" or os.getenv(
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "fangfei.sqlite3"))).resolve()
-STORAGE_PATH = Path(os.getenv("STORAGE_PATH", str(BASE_DIR / "data" if USE_POSTGRES else DATABASE_PATH.parent))).resolve()
 SESSION_COOKIE = "fangfei_session"
 CSRF_COOKIE = "fangfei_csrf"
 SESSION_DAYS = 14
@@ -42,7 +41,6 @@ WORK_CATEGORIES = {"小说", "诗歌", "散文", "随笔", "剧本", "科幻", "
 PROFILE_COVER_THEMES = {"starry", "deepsea", "sky", "flower", "dragon", "qingli", ""}
 RANKING_WEIGHTS = {"views": 1, "likes": 8, "favorites": 10, "comments": 4}
 
-AVATAR_DIR = STORAGE_PATH / "avatars"
 AVATAR_NAME_RE = re.compile(r"^[a-f0-9]{32}[.]webp$")
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 AVATAR_SIZE = 512
@@ -416,12 +414,20 @@ CREATE TABLE IF NOT EXISTS agent_review_tasks (
   resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_review_tasks(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS avatar_blobs (
+  name TEXT PRIMARY KEY,
+  content_type TEXT NOT NULL DEFAULT 'image/webp',
+  data BLOB NOT NULL,
+  created_at INTEGER NOT NULL
+);
 """
 
 SCHEMA_PG = (
     SCHEMA.replace("PRAGMA foreign_keys = ON;", "")
     .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
     .replace(" COLLATE NOCASE", "")
+    .replace("data BLOB NOT NULL", "data BYTEA NOT NULL")
 )
 # 毫秒时间戳超出 PostgreSQL INTEGER 范围，剩余整型列统一提升为 BIGINT
 SCHEMA_PG = re.sub(r"\bINTEGER\b", "BIGINT", SCHEMA_PG)
@@ -1308,10 +1314,7 @@ def remove_old_avatar(value: str) -> None:
     name = value.rsplit("/", 1)[-1]
     if not AVATAR_NAME_RE.fullmatch(name):
         return
-    try:
-        (AVATAR_DIR / name).unlink()
-    except OSError:
-        pass
+    get_db().execute("DELETE FROM avatar_blobs WHERE name = ?", (name,))
 
 
 def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) -> dict:
@@ -1452,7 +1455,7 @@ def build_system_health(db, is_admin: bool) -> list[dict]:
     add("数据库", lambda: ("正常", "PostgreSQL" if USE_POSTGRES else "SQLite") if db.execute("SELECT 1").fetchone() else ("异常", "无响应"))
     add("作品保存", lambda: count_check("SELECT COUNT(*) AS count FROM works", "篇作品"))
     add("Agent", lambda: _agent_health(db))
-    add("文件存储", lambda: ("正常", "头像目录可写") if AVATAR_DIR.exists() and os.access(STORAGE_PATH, os.W_OK) else ("无法检测", "头像目录尚未创建，首次上传后可用"))
+    add("文件存储", lambda: count_check("SELECT COUNT(*) AS count FROM avatar_blobs", "个头像文件（存于数据库）"))
     add("投稿审核", lambda: count_check("SELECT COUNT(*) AS count FROM works WHERE status IN ('pending', 'pending_agent', 'pending_review')", "篇待处理"))
     add("私信", lambda: count_check("SELECT COUNT(*) AS count FROM conversations", "个会话"))
     add("排行榜", lambda: ("正常", f"{len(build_rankings(db))} 个时间范围"))
@@ -2556,7 +2559,16 @@ def read_notifications():
 def serve_avatar(name: str):
     if not AVATAR_NAME_RE.fullmatch(name):
         abort(404)
-    return send_from_directory(AVATAR_DIR, name, max_age=86400)
+    row = get_db().execute(
+        "SELECT content_type, data FROM avatar_blobs WHERE name = ?", (name,)
+    ).fetchone()
+    if not row:
+        abort(404)
+    return Response(
+        bytes(row["data"]),
+        mimetype=row["content_type"] or "image/webp",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.post("/api/profile/avatar")
@@ -2583,14 +2595,19 @@ def upload_avatar():
             image = ImageOps.fit(image_source.convert("RGBA" if rgba else "RGB"), (AVATAR_SIZE, AVATAR_SIZE), method=Image.LANCZOS)
     except Exception:
         return json_error("头像文件无法识别", 415)
-    AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+    buffer = io.BytesIO()
+    image.save(buffer, "WEBP", quality=88, method=6)
     stored_name = f"{secrets.token_hex(16)}.webp"
-    image.save(AVATAR_DIR / stored_name, "WEBP", quality=88, method=6)
+    db = get_db()
+    db.execute(
+        "INSERT INTO avatar_blobs (name, content_type, data, created_at) VALUES (?, ?, ?, ?)",
+        (stored_name, "image/webp", buffer.getvalue(), now_ms()),
+    )
     previous = row_value(g.user, "avatar", "") or ""
-    get_db().execute("UPDATE users SET avatar = ? WHERE id = ?", (f"/avatars/{stored_name}", g.user["id"]))
-    audit("更新头像", "user", str(g.user["id"]), "用户上传新头像", g.user["id"])
-    get_db().commit()
+    db.execute("UPDATE users SET avatar = ? WHERE id = ?", (f"/avatars/{stored_name}", g.user["id"]))
     remove_old_avatar(previous)
+    audit("更新头像", "user", str(g.user["id"]), "用户上传新头像", g.user["id"])
+    db.commit()
     return json_ok(bootstrap_payload())
 
 
