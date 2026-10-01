@@ -10,6 +10,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -22,7 +23,10 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
 IS_PRODUCTION = os.getenv("FLASK_ENV", "").lower() == "production" or os.getenv("RENDER", "").lower() == "true"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "fangfei.sqlite3"))).resolve()
+STORAGE_PATH = Path(os.getenv("STORAGE_PATH", str(BASE_DIR / "data" if USE_POSTGRES else DATABASE_PATH.parent))).resolve()
 SESSION_COOKIE = "fangfei_session"
 CSRF_COOKIE = "fangfei_csrf"
 SESSION_DAYS = 14
@@ -38,13 +42,16 @@ WORK_CATEGORIES = {"小说", "诗歌", "散文", "随笔", "剧本", "科幻", "
 PROFILE_COVER_THEMES = {"starry", "deepsea", "sky", "flower", "dragon", "qingli", ""}
 RANKING_WEIGHTS = {"views": 1, "likes": 8, "favorites": 10, "comments": 4}
 
-AVATAR_DIR = DATABASE_PATH.parent / "avatars"
+AVATAR_DIR = STORAGE_PATH / "avatars"
 AVATAR_NAME_RE = re.compile(r"^[a-f0-9]{32}[.]webp$")
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 AVATAR_SIZE = 512
 AVATAR_FORMATS = {"JPEG", "MPO", "PNG", "WEBP"}
 
 WORK_VISIBILITY = {"PUBLIC", "PRIVATE"}
+WORK_STATUSES = {"draft", "pending", "pending_agent", "pending_review", "published", "rejected", "hidden"}
+AGENT_POLICY_VERSION = "fangfei-agent-1.0"
+AGENT_MODEL_NAME = "rules-v1"
 TOPIC_STATUSES = {"DRAFT", "PUBLISHED", "ENDED", "ARCHIVED"}
 
 # 有效作品的类型最低字数，集中配置，供排行榜与统计复用
@@ -365,7 +372,149 @@ CREATE TABLE IF NOT EXISTS plagiarism_checks (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plagiarism_work ON plagiarism_checks(work_id);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_run_id TEXT NOT NULL UNIQUE,
+  content_id INTEGER NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'work',
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  duration INTEGER NOT NULL DEFAULT 0,
+  policy_version TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_content ON agent_runs(content_type, content_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_created ON agent_runs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_moderation_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_run_id TEXT NOT NULL UNIQUE,
+  content_id INTEGER NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'work',
+  risk_level TEXT NOT NULL DEFAULT 'LOW',
+  category TEXT NOT NULL DEFAULT '',
+  confidence REAL NOT NULL DEFAULT 0,
+  recommendation TEXT NOT NULL DEFAULT 'REVIEW',
+  needs_human_review INTEGER NOT NULL DEFAULT 1,
+  details_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_results_content ON agent_moderation_results(content_type, content_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_review_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_run_id TEXT NOT NULL UNIQUE,
+  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_review_tasks(status, created_at DESC);
 """
+
+SCHEMA_PG = (
+    SCHEMA.replace("PRAGMA foreign_keys = ON;", "")
+    .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+    .replace(" COLLATE NOCASE", "")
+)
+SCHEMA_PG += "\nCREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username));\n"
+
+AUTO_ID_TABLES = {
+    "users", "admin_transfers", "works", "work_views", "comments", "activities",
+    "announcements", "monthly_picks", "monthly_awards", "conversations", "messages",
+    "notifications", "reports", "audit_logs", "topics", "risk_events", "plagiarism_checks",
+    "agent_runs", "agent_moderation_results", "agent_review_tasks",
+}
+
+
+def _translate_pg_sql(sql: str) -> str:
+    ignore = re.search(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", sql, flags=re.IGNORECASE)
+    if ignore:
+        sql = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", sql, count=1, flags=re.IGNORECASE)
+    sql = sql.replace("?", "%s")
+    if ignore and not re.search(r"\bON\s+CONFLICT\b", sql, flags=re.IGNORECASE):
+        sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    match = re.match(r"^\s*INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)", sql, flags=re.IGNORECASE)
+    if match and match.group(1).lower() in AUTO_ID_TABLES and not re.search(r"\bRETURNING\b", sql, flags=re.IGNORECASE):
+        sql = sql.rstrip().rstrip(";") + " RETURNING id"
+    return sql
+
+
+class PgCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.lastrowid = None
+
+    def execute(self, query, params=None):
+        query = _translate_pg_sql(query)
+        self._cursor.execute(query, params or ())
+        if re.search(r"\bRETURNING\s+id\b", query, flags=re.IGNORECASE):
+            row = self._cursor.fetchone()
+            self.lastrowid = row["id"] if isinstance(row, dict) else (row[0] if row else None)
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def close(self):
+        return self._cursor.close()
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+
+class PgConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, query, params=None):
+        return PgCursor(self._connection.cursor()).execute(query, params)
+
+    def executescript(self, script):
+        with self._connection.cursor() as cursor:
+            for statement in script.split(";"):
+                statement = statement.strip()
+                if statement:
+                    cursor.execute(statement)
+
+    def commit(self):
+        return self._connection.commit()
+
+    def rollback(self):
+        return self._connection.rollback()
+
+    def close(self):
+        return self._connection.close()
+
+
+def _connect_db():
+    if USE_POSTGRES:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError("PostgreSQL requires psycopg[binary]. Install requirements.txt or use SQLite.") from exc
+        return PgConnection(psycopg.connect(DATABASE_URL, row_factory=dict_row))
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
 
 
 def now_ms() -> int:
@@ -378,15 +527,9 @@ def iso_time(ms: int | None) -> str:
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
-def get_db() -> sqlite3.Connection:
+def get_db():
     if "db" not in g:
-        DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(DATABASE_PATH, timeout=15)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        g.db = conn
+        g.db = _connect_db()
     return g.db
 
 
@@ -426,15 +569,21 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
         },
     }
     for table, columns in migrations.items():
-        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if USE_POSTGRES:
+            rows = conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ?",
+                (table,),
+            ).fetchall()
+            existing = {row["column_name"] for row in rows}
+        else:
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         for name, ddl in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 def sync_system_data() -> None:
-    conn = sqlite3.connect(DATABASE_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
+    conn = _connect_db()
     try:
         has_super = conn.execute("SELECT 1 FROM admin_roles WHERE level = 'super' LIMIT 1").fetchone() is not None
         senior_count = conn.execute("SELECT COUNT(*) AS count FROM admin_roles WHERE level = 'senior'").fetchone()["count"]
@@ -492,10 +641,9 @@ def sync_system_data() -> None:
 
 
 def init_db() -> None:
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH, timeout=15)
+    conn = _connect_db()
     try:
-        conn.executescript(SCHEMA)
+        conn.executescript(SCHEMA_PG if USE_POSTGRES else SCHEMA)
         migrate_columns(conn)
         conn.commit()
     finally:
@@ -505,8 +653,7 @@ def init_db() -> None:
 
 
 def ensure_admin() -> None:
-    conn = sqlite3.connect(DATABASE_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
+    conn = _connect_db()
     try:
         existing = conn.execute("SELECT id, username FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
         password = os.getenv("ADMIN_PASSWORD", "")
@@ -838,11 +985,14 @@ def is_effective_work(body, category: str, status: str, visibility: str = "PUBLI
     return status == "published" and visibility == "PUBLIC" and word_count(body) >= min_words_for(category)
 
 
-def author_work_stats(db: sqlite3.Connection, author_id: int) -> dict:
+def author_work_stats(db: sqlite3.Connection, author_id: int, public_only: bool = False) -> dict:
     """把投稿总数、有效作品数、公开/私密、草稿、审核中拆开统计。"""
     stats = {"submitted": 0, "effective": 0, "published": 0, "private": 0, "draft": 0, "pending": 0}
+    where = "author_id = ?"
+    if public_only:
+        where += " AND status = 'published' AND is_public = 1 AND visibility = 'PUBLIC'"
     rows = db.execute(
-        "SELECT status, visibility, category, body_json FROM works WHERE author_id = ?",
+        f"SELECT status, visibility, category, body_json FROM works WHERE {where}",
         (author_id,),
     ).fetchall()
     for row in rows:
@@ -853,7 +1003,7 @@ def author_work_stats(db: sqlite3.Connection, author_id: int) -> dict:
             stats["private"] += 1
         if status == "draft":
             stats["draft"] += 1
-        if status == "pending":
+        if status in {"pending", "pending_agent", "pending_review"}:
             stats["pending"] += 1
         if status == "published" and visibility == "PUBLIC":
             stats["published"] += 1
@@ -979,6 +1129,177 @@ def detect_similarity(db: sqlite3.Connection, text: str, exclude_work_id=None) -
     return best
 
 
+def evaluate_work_content(db, author_id: int, body, category: str, work_id: int | None = None) -> dict:
+    """规则型 Agent 审核器。只输出建议，不直接封禁或修改管理员权限。"""
+    text = "\n".join(str(part) for part in (body or []) if part)
+    signals: list[str] = []
+    score = 0
+    words = word_count(body)
+    minimum = min_words_for(category)
+    if words < minimum:
+        score += 2
+        signals.append(f"字数低于类型参考值 {minimum}")
+    similarity = detect_similarity(db, text, exclude_work_id=work_id)
+    if similarity["level"] == "high":
+        score += 5
+        signals.append(f"站内相似度较高：{similarity['title']}")
+    elif similarity["level"] == "medium":
+        score += 3
+        signals.append(f"站内存在相似内容：{similarity['title']}")
+    link_count = len(re.findall(r"https?://|www\.", text, flags=re.IGNORECASE))
+    if link_count > 8:
+        score += 4
+        signals.append("外部链接数量异常")
+    elif link_count > 3:
+        score += 2
+        signals.append("外部链接偏多")
+    if re.search(r"赌博|博彩|色情|诈骗|刷单|代写|出售账号", text, flags=re.IGNORECASE):
+        score += 6
+        signals.append("命中高风险词")
+    compact = re.sub(r"\s+", "", text)
+    if len(compact) >= 30:
+        repeated = sum(1 for i in range(len(compact) - 8) if compact[i:i + 8] == compact[i + 4:i + 12])
+        if repeated / max(1, len(compact) - 8) > 0.35:
+            score += 2
+            signals.append("重复片段偏多")
+    author = db.execute("SELECT risk_level FROM users WHERE id = ?", (author_id,)).fetchone()
+    account_risk = (author["risk_level"] if author and "risk_level" in author.keys() else "LOW") or "LOW"
+    if account_risk in {"HIGH", "CRITICAL"}:
+        score += 4
+        signals.append(f"账号风险等级为 {account_risk}")
+    pending_risks = db.execute(
+        "SELECT level FROM risk_events WHERE user_id = ? AND status = 'pending'",
+        (author_id,),
+    ).fetchall()
+    if any((row["level"] or "").upper() in {"HIGH", "CRITICAL"} for row in pending_risks):
+        score += 4
+        signals.append("账号存在未处理高风险记录")
+    if score >= 8:
+        level = "CRITICAL"
+    elif score >= 5:
+        level = "HIGH"
+    elif score >= 2:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+    needs_human = level != "LOW"
+    category_name = "正常"
+    if signals:
+        category_name = signals[0].split("：", 1)[0]
+    recommendation = "ALLOW" if not needs_human else "REVIEW"
+    return {
+        "risk_level": level,
+        "category": category_name,
+        "confidence": 0.92 if level == "LOW" else 0.78 if level == "MEDIUM" else 0.84,
+        "recommendation": recommendation,
+        "needs_human_review": needs_human,
+        "signals": signals or ["未发现明显风险信号"],
+    }
+
+
+def run_agent_review(work_id: int, author_id: int, title: str, body, category: str) -> dict:
+    """执行投稿审核并安全落库。异常一律进入人工复核。"""
+    agent_run_id = f"ar_{uuid.uuid4().hex}"
+    started = time.monotonic()
+    created_at = now_ms()
+    db = get_db()
+    try:
+        result = evaluate_work_content(db, author_id, body, category, work_id=work_id)
+        duration = max(0, int((time.monotonic() - started) * 1000))
+        db.execute(
+            """
+            INSERT INTO agent_runs (
+              agent_run_id, content_id, content_type, user_id, status, error, created_at,
+              duration, policy_version, model, prompt_version
+            ) VALUES (?, ?, 'work', ?, 'completed', '', ?, ?, ?, ?, 'none')
+            """,
+            (agent_run_id, work_id, author_id, created_at, duration, AGENT_POLICY_VERSION, AGENT_MODEL_NAME),
+        )
+        db.execute(
+            """
+            INSERT INTO agent_moderation_results (
+              agent_run_id, content_id, content_type, risk_level, category, confidence,
+              recommendation, needs_human_review, details_json, created_at
+            ) VALUES (?, ?, 'work', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent_run_id, work_id, result["risk_level"], result["category"], result["confidence"],
+                result["recommendation"], int(result["needs_human_review"]),
+                json.dumps(result["signals"], ensure_ascii=False), created_at,
+            ),
+        )
+        if result["needs_human_review"]:
+            db.execute(
+                "INSERT INTO agent_review_tasks (agent_run_id, work_id, reason, status, created_at) VALUES (?, ?, ?, 'open', ?)",
+                (agent_run_id, work_id, result["category"], created_at),
+            )
+            db.execute(
+                "UPDATE works SET status = 'pending_review', review_note = ?, updated_at = ? WHERE id = ?",
+                ("Agent 建议人工复核：" + "；".join(result["signals"]), created_at, work_id),
+            )
+        else:
+            db.execute(
+                "UPDATE works SET status = 'published', review_note = '', published_at = ?, updated_at = ? WHERE id = ?",
+                (created_at, created_at, work_id),
+            )
+        db.commit()
+        audit("Agent 审核", "work", str(work_id), f"Agent {result['risk_level']}，{result['recommendation']}", None)
+        db.commit()
+        return {"agent_run_id": agent_run_id, **result}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        duration = max(0, int((time.monotonic() - started) * 1000))
+        error_text = f"{type(exc).__name__}: {exc}"[:500]
+        try:
+            db.execute(
+                """
+                INSERT INTO agent_runs (
+                  agent_run_id, content_id, content_type, user_id, status, error, created_at,
+                  duration, policy_version, model, prompt_version
+                ) VALUES (?, ?, 'work', ?, 'error', ?, ?, ?, ?, ?, 'none')
+                """,
+                (agent_run_id, work_id, author_id, error_text, created_at, duration, AGENT_POLICY_VERSION, AGENT_MODEL_NAME),
+            )
+            db.execute(
+                """
+                INSERT INTO agent_moderation_results (
+                  agent_run_id, content_id, content_type, risk_level, category, confidence,
+                  recommendation, needs_human_review, details_json, created_at
+                ) VALUES (?, ?, 'work', 'HIGH', '审核异常', 0, 'REVIEW', 1, ?, ?)
+                """,
+                (agent_run_id, work_id, json.dumps(["Agent 执行异常，已转人工复核"], ensure_ascii=False), created_at),
+            )
+            db.execute(
+                "INSERT INTO agent_review_tasks (agent_run_id, work_id, reason, status, created_at) VALUES (?, ?, '审核异常', 'open', ?)",
+                (agent_run_id, work_id, created_at),
+            )
+            db.execute(
+                "UPDATE works SET status = 'pending_review', review_note = 'Agent 审核异常，已转人工复核。', updated_at = ? WHERE id = ?",
+                (created_at, work_id),
+            )
+            db.commit()
+            audit("Agent 异常", "work", str(work_id), error_text, None)
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return {
+            "agent_run_id": agent_run_id,
+            "risk_level": "HIGH",
+            "category": "审核异常",
+            "confidence": 0,
+            "recommendation": "REVIEW",
+            "needs_human_review": True,
+            "signals": ["Agent 执行异常，已转人工复核"],
+            "error": error_text,
+        }
+
+
 def remove_old_avatar(value: str) -> None:
     if not value.startswith("/avatars/"):
         return
@@ -1073,20 +1394,25 @@ def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) ->
                     stats["works"] += 1
                 stats["words"] += words
 
-        award_sql = "SELECT author_id, COUNT(*) AS count FROM monthly_awards WHERE status = 'active'"
+        award_sql = """
+            SELECT ma.author_id, COUNT(*) AS count
+            FROM monthly_awards ma
+            JOIN works w ON w.id = ma.work_id
+            WHERE ma.status = 'active' AND w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'
+        """
         award_params: list[object] = []
         current = datetime.now(timezone.utc)
         if period == "month":
-            award_sql += " AND month = ?"
+            award_sql += " AND ma.month = ?"
             award_params.append(current.strftime("%Y-%m"))
         elif period == "quarter":
             start_month = ((current.month - 1) // 3) * 3 + 1
-            award_sql += " AND month >= ? AND month <= ?"
+            award_sql += " AND ma.month >= ? AND ma.month <= ?"
             award_params.extend((f"{current.year}-{start_month:02d}", f"{current.year}-{start_month + 2:02d}"))
         elif period == "year":
-            award_sql += " AND month LIKE ?"
+            award_sql += " AND ma.month LIKE ?"
             award_params.append(f"{current.year}-%")
-        award_sql += " GROUP BY author_id"
+        award_sql += " GROUP BY ma.author_id"
         for row in db.execute(award_sql, award_params).fetchall():
             author_id = f"u{row['author_id']}"
             stats = author_stats.setdefault(
@@ -1099,6 +1425,48 @@ def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) ->
             "authors": [item for item in author_stats.values() if item["works"] or item["awards"] or item["words"] or item["popularity"]],
         }
     return rankings
+
+
+def build_system_health(db, is_admin: bool) -> list[dict]:
+    if not is_admin:
+        return []
+    checks: list[dict] = []
+
+    def add(name: str, check):
+        try:
+            status, detail = check()
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            status, detail = "异常", f"检测失败：{type(exc).__name__}"
+        checks.append({"name": name, "status": status, "detail": detail})
+
+    def count_check(sql: str, suffix: str):
+        count = int(db.execute(sql).fetchone()["count"])
+        return "正常", f"{count} {suffix}"
+
+    add("数据库", lambda: ("正常", "PostgreSQL" if USE_POSTGRES else "SQLite") if db.execute("SELECT 1").fetchone() else ("异常", "无响应"))
+    add("作品保存", lambda: count_check("SELECT COUNT(*) AS count FROM works", "篇作品"))
+    add("Agent", lambda: _agent_health(db))
+    add("文件存储", lambda: ("正常", "头像目录可写") if AVATAR_DIR.exists() and os.access(STORAGE_PATH, os.W_OK) else ("无法检测", "头像目录尚未创建，首次上传后可用"))
+    add("投稿审核", lambda: count_check("SELECT COUNT(*) AS count FROM works WHERE status IN ('pending', 'pending_agent', 'pending_review')", "篇待处理"))
+    add("私信", lambda: count_check("SELECT COUNT(*) AS count FROM conversations", "个会话"))
+    add("排行榜", lambda: ("正常", f"{len(build_rankings(db))} 个时间范围"))
+    add("月度评选", lambda: count_check("SELECT COUNT(*) AS count FROM monthly_awards WHERE status = 'active'", "条有效记录"))
+    return checks
+
+
+def _agent_health(db) -> tuple[str, str]:
+    row = db.execute(
+        "SELECT status, error, created_at, duration FROM agent_runs ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return "无法检测", "尚无 Agent 运行记录"
+    if row["status"] == "error":
+        return "异常", f"最近一次异常：{row['error'] or '未知错误'}"
+    return "正常", f"最近运行 {iso_time(row['created_at'])}，耗时 {int(row['duration'] or 0)}ms"
 
 
 def build_state(user) -> dict:
@@ -1183,16 +1551,18 @@ def build_state(user) -> dict:
             }
         )
 
-    authors_sql = """
+    public_work_filter = "" if is_admin else " AND w.is_public = 1 AND w.visibility = 'PUBLIC'"
+    authors_sql = f"""
       SELECT u.*,
-        (SELECT COUNT(*) FROM works w WHERE w.author_id = u.id AND w.status = 'published') AS work_count,
+        (SELECT COUNT(*) FROM works w WHERE w.author_id = u.id AND w.status = 'published'{public_work_filter}) AS work_count,
         (SELECT COUNT(*) FROM follows f WHERE f.author_id = u.id) AS follower_count,
-        (SELECT COUNT(*) FROM monthly_awards ma WHERE ma.author_id = u.id AND ma.status = 'active') AS award_count,
-        (SELECT COALESCE(SUM(w.views), 0) FROM works w WHERE w.author_id = u.id AND w.status = 'published') AS views_count
+        (SELECT COUNT(*) FROM monthly_awards ma JOIN works w ON w.id = ma.work_id
+          WHERE ma.author_id = u.id AND ma.status = 'active' AND w.status = 'published'{public_work_filter}) AS award_count,
+        (SELECT COALESCE(SUM(w.views), 0) FROM works w WHERE w.author_id = u.id AND w.status = 'published'{public_work_filter}) AS views_count
       FROM users u
     """
     if not is_admin:
-        authors_sql += " WHERE EXISTS (SELECT 1 FROM works w WHERE w.author_id = u.id AND w.status = 'published')"
+        authors_sql += " WHERE EXISTS (SELECT 1 FROM works w WHERE w.author_id = u.id AND w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC')"
     authors_sql += " ORDER BY work_count DESC, u.created_at ASC"
     authors = []
     for row in db.execute(authors_sql).fetchall():
@@ -1202,7 +1572,7 @@ def build_state(user) -> dict:
             "followerCount": row["follower_count"],
             "awardCount": row["award_count"],
             "views": row["views_count"],
-            "stats": author_work_stats(db, row["id"]),
+            "stats": author_work_stats(db, row["id"], public_only=not is_admin),
         })
         authors.append(author)
 
@@ -1233,7 +1603,7 @@ def build_state(user) -> dict:
         for row in db.execute(announcement_sql).fetchall()
     ]
 
-    monthly_visibility = "" if is_admin else "AND w.status = 'published' AND w.is_public = 1"
+    monthly_visibility = "AND w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'"
     monthly_awards = [
         {
             "id": f"a{row['id']}",
@@ -1275,6 +1645,9 @@ def build_state(user) -> dict:
     users = []
     admin_roles = []
     admin_transfers = []
+    agent_runs = []
+    agent_results = []
+    agent_tasks = []
 
     if user_id:
         followed = [f"u{row['author_id']}" for row in db.execute("SELECT author_id FROM follows WHERE follower_id = ?", (user_id,)).fetchall()]
@@ -1423,6 +1796,49 @@ def build_state(user) -> dict:
                 """
             ).fetchall()
         ]
+        agent_runs = [
+            {
+                "runId": row["agent_run_id"],
+                "workId": f"w{row['content_id']}" if row["content_type"] == "work" else "",
+                "userId": f"u{row['user_id']}" if row["user_id"] else "",
+                "status": row["status"],
+                "error": row["error"],
+                "duration": int(row["duration"] or 0),
+                "policyVersion": row["policy_version"],
+                "model": row["model"],
+                "at": iso_time(row["created_at"]),
+            }
+            for row in db.execute(
+                "SELECT * FROM agent_runs ORDER BY created_at DESC LIMIT 100"
+            ).fetchall()
+        ]
+        agent_results = [
+            {
+                "runId": row["agent_run_id"],
+                "workId": f"w{row['content_id']}" if row["content_type"] == "work" else "",
+                "riskLevel": row["risk_level"],
+                "category": row["category"],
+                "confidence": float(row["confidence"] or 0),
+                "recommendation": row["recommendation"],
+                "needsHumanReview": bool(row["needs_human_review"]),
+                "at": iso_time(row["created_at"]),
+            }
+            for row in db.execute(
+                "SELECT * FROM agent_moderation_results ORDER BY created_at DESC LIMIT 100"
+            ).fetchall()
+        ]
+        agent_tasks = [
+            {
+                "runId": row["agent_run_id"],
+                "workId": f"w{row['work_id']}",
+                "reason": row["reason"],
+                "status": row["status"],
+                "at": iso_time(row["created_at"]),
+            }
+            for row in db.execute(
+                "SELECT * FROM agent_review_tasks ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, created_at DESC LIMIT 100"
+            ).fetchall()
+        ]
 
     topic_sql = """
       SELECT t.*, u.display_name AS creator_name,
@@ -1524,6 +1940,10 @@ def build_state(user) -> dict:
         "topics": topics,
         "riskEvents": risk_events,
         "plagiarismFlags": plagiarism_flags,
+        "agentRuns": agent_runs,
+        "agentResults": agent_results,
+        "agentTasks": agent_tasks,
+        "systemHealth": build_system_health(db, is_admin),
         "rankings": build_rankings(db, authors),
         "rankingWeights": RANKING_WEIGHTS,
     }
@@ -1642,7 +2062,7 @@ def register():
     if len(password) < 8 or len(password) > 128:
         return json_error("密码需为 8-128 位", 400)
     db = get_db()
-    if db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+    if db.execute("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone():
         return json_error("该用户名已被使用", 409)
     cursor = db.execute(
         "INSERT INTO users (username, display_name, password_hash, role, bio, created_at) VALUES (?, ?, ?, 'reader', '', ?)",
@@ -1668,7 +2088,7 @@ def login():
     payload = request_json()
     username = clean_text(payload.get("username"), 32, required=True)
     password = str(payload.get("password") or "")
-    user = get_db().execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    user = get_db().execute("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone()
     if not user or row_value(user, "account_status", "active") != "active" or not check_password_hash(user["password_hash"], password):
         return json_error("用户名或密码不正确", 401)
     raw_token, csrf_token = issue_session(user["id"])
@@ -1771,7 +2191,7 @@ def save_work(work_id: int | None = None):
     if work_id is None:
         if not rate_limit("create_work", 20, 3600):
             return json_error("投稿过于频繁", 429)
-        status = "draft" if action == "draft" else "pending"
+        status = "draft" if action == "draft" else "pending_agent"
         cursor = db.execute(
             """
             INSERT INTO works (
@@ -1796,7 +2216,7 @@ def save_work(work_id: int | None = None):
             return json_error("作品不存在或无权修改", 404)
         if existing["status"] not in {"draft", "rejected"}:
             return json_error("只有草稿或未通过作品可以修改", 409)
-        status = "draft" if action == "draft" else "pending"
+        status = "draft" if action == "draft" else "pending_agent"
         db.execute(
             """
             UPDATE works SET title = ?, category = ?, tags_json = ?, excerpt = ?, body_json = ?,
@@ -1826,9 +2246,19 @@ def save_work(work_id: int | None = None):
                 f"作品《{title}》与《{similarity['title']}》相似度 {similarity['score']:.0%}",
                 level="HIGH", target_type="work", target_id=str(work_id),
             )
+    if action == "submit":
+        # 先提交作品本身，Agent 无论成功或异常都不会丢失稿件。
+        db.commit()
+        agent_result = run_agent_review(work_id, g.user["id"], title, body, category)
+        if agent_result.get("needs_human_review"):
+            notice = f"作品《{title}》已提交，Agent 建议人工复核。"
+        else:
+            notice = f"作品《{title}》已通过 Agent 自动审核并发布。"
+    else:
+        notice = f"作品《{title}》已保存为草稿。"
     action_text = "保存草稿" if action == "draft" else "提交审核"
     audit(action_text, "work", str(work_id), f"{action_text}《{title}》", g.user["id"])
-    notify(g.user["id"], f"作品《{title}》{'已保存为草稿' if action == 'draft' else '已提交审核，等待编辑部处理'}。", "work", f"#/work/w{work_id}")
+    notify(g.user["id"], notice, "work", f"#/work/w{work_id}")
     db.commit()
     return json_ok(bootstrap_payload())
 
@@ -1884,7 +2314,7 @@ def toggle_like(work_id: int):
             (g.user["id"], work_id, now_ms(), int(effective)),
         )
         if not effective:
-            record_risk(db, g.user["id"], "like_pattern", reason, level="MEDIUM", target_type="like", target_id=str(cursor.lastrowid))
+            record_risk(db, g.user["id"], "like_pattern", reason, level="MEDIUM", target_type="like", target_id=f"{g.user['id']}:{work_id}")
     db.commit()
     return json_ok(bootstrap_payload())
 
@@ -2235,11 +2665,19 @@ def handle_risk(risk_id: int):
         (action, g.user["id"], now_ms(), risk_id),
     )
     effective = 1 if action in {"normal", "restored"} else 0
-    target_id = parse_numeric_id(row["target_id"])
-    if target_id and row["target_type"] == "like":
-        db.execute("UPDATE likes SET effective = ? WHERE rowid = ?", (effective, target_id))
-    elif target_id and row["target_type"] == "comment":
-        db.execute("UPDATE comments SET effective = ? WHERE id = ?", (effective, target_id))
+    target_raw = str(row["target_id"] or "")
+    if row["target_type"] == "like" and ":" in target_raw:
+        user_part, work_part = target_raw.split(":", 1)
+        db.execute(
+            "UPDATE likes SET effective = ? WHERE user_id = ? AND work_id = ?",
+            (effective, parse_numeric_id(user_part), parse_numeric_id(work_part)),
+        )
+    elif row["target_type"] == "like" and target_raw.isdigit() and not USE_POSTGRES:
+        db.execute("UPDATE likes SET effective = ? WHERE rowid = ?", (effective, int(target_raw)))
+    elif row["target_type"] == "comment":
+        target_id = parse_numeric_id(target_raw)
+        if target_id:
+            db.execute("UPDATE comments SET effective = ? WHERE id = ?", (effective, target_id))
     if action == "limited" and row["user_id"]:
         db.execute("UPDATE users SET risk_level = 'HIGH' WHERE id = ?", (row["user_id"],))
     elif action in {"normal"} and row["user_id"]:
@@ -2290,9 +2728,14 @@ def review_work(work_id: int):
         return json_error("作品不存在", 404)
     status = {"publish": "published", "reject": "rejected", "hide": "hidden"}[action]
     published_at = now_ms() if action == "publish" else work["published_at"]
+    reviewed_at = now_ms()
     get_db().execute(
         "UPDATE works SET status = ?, review_note = ?, published_at = ?, updated_at = ? WHERE id = ?",
-        (status, note, published_at, now_ms(), work_id),
+        (status, note, published_at, reviewed_at, work_id),
+    )
+    get_db().execute(
+        "UPDATE agent_review_tasks SET status = 'resolved', resolved_at = ?, resolved_by = ? WHERE work_id = ? AND status = 'open'",
+        (reviewed_at, g.user["id"], work_id),
     )
     label = {"publish": "通过审核", "reject": "退回修改", "hide": "下架作品"}[action]
     notify(work["author_id"], f"作品《{work['title']}》{label}。" + (f" 审核意见：{note}" if note else ""), "work", f"#/work/w{work_id}")
@@ -2364,9 +2807,9 @@ def create_activity():
 @require_admin
 def save_monthly_award():
     payload = request_json()
-    work_id = parse_public_id(payload.get("workId"))
+    work_id = parse_numeric_id(payload.get("workId"))
     month = clean_text(payload.get("month"), 7, required=True)
-    if not work_id or not re.fullmatch(r"\d{4}-\d{2}", month):
+    if not work_id or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
         return json_error("月份或作品无效", 400)
     try:
         rank = int(payload.get("rank", 1))
@@ -2375,7 +2818,10 @@ def save_monthly_award():
     if rank < 1 or rank > 20:
         return json_error("名次无效", 400)
     reason = clean_text(payload.get("reason"), 300)
-    work = get_db().execute("SELECT * FROM works WHERE id = ? AND status = 'published' AND is_public = 1", (work_id,)).fetchone()
+    work = get_db().execute(
+        "SELECT * FROM works WHERE id = ? AND status = 'published' AND is_public = 1 AND visibility = 'PUBLIC'",
+        (work_id,),
+    ).fetchone()
     if not work:
         return json_error("只有公开作品可以进入月度优秀", 400)
     existing = get_db().execute(

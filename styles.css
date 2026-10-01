@@ -519,10 +519,10 @@ html, body { overflow-x: hidden; }
 .auth-tabs button.is-active { color: var(--seal); border-color: var(--seal); }
 
 /* V2.1 unified modal, profile, submission and admin surfaces */
-.modal { display: flex; flex-direction: column; width: min(760px, 100%); max-height: min(86vh, 820px); padding: 0; overflow: hidden; border: 1px solid var(--modal-border); border-radius: var(--modal-radius); background: linear-gradient(145deg, var(--modal-glass), var(--modal-glass-alt)); box-shadow: var(--modal-shadow); backdrop-filter: blur(24px) saturate(1.18); }
-.modal-head { padding: 25px 30px 18px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.12); }
+.modal { display: flex; flex-direction: column; width: min(760px, 100%); max-height: min(86vh, 820px); min-height: 0; padding: 0; overflow: hidden; border: 1px solid var(--modal-border); border-radius: var(--modal-radius); background: linear-gradient(145deg, var(--modal-glass), var(--modal-glass-alt)); box-shadow: var(--modal-shadow); backdrop-filter: blur(24px) saturate(1.18); }
+.modal-head { flex: 0 0 auto; padding: 25px 30px 18px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.12); }
 .modal-head h2 { margin: 7px 0 0; font-family: var(--serif); font-size: 28px; }
-.modal-body { min-height: 0; padding: 24px 30px; overflow: auto; overscroll-behavior: contain; }
+.modal-body { flex: 1 1 auto; min-height: 0; padding: 24px 30px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .modal-footer { flex: 0 0 auto; padding: 16px 30px 22px; border-top: 1px solid var(--line); background: rgba(255,255,255,.18); backdrop-filter: blur(14px); }
 .modal-footer .modal-actions { margin-top: 0; }
 .modal-close { z-index: 2; display: grid; place-items: center; color: var(--ink-soft); background: var(--control-glass); border: 1px solid var(--modal-border); line-height: 1; backdrop-filter: blur(12px); }
