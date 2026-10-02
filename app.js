@@ -11,6 +11,7 @@
     qingli: { name: "青璃·映界", image: "images/styles/qingli.webp", description: "清透青绿与柔和暖光交织。" }
   };
   const THEME_KEY = "fangfei_theme_v1";
+  const PUBLIC_CACHE_KEY = "fangfei_public_cache_v1";
   const DEFAULT_RANKING_WEIGHTS = Object.freeze({ views: 1, likes: 8, favorites: 10, comments: 4 });
   const DATA_VERSION = 8;
   const MAX_WORK_BODY_CHARS = 20000;
@@ -83,12 +84,13 @@
     const headers = Object.assign({ Accept: "application/json" }, options.headers || {});
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
     if (method !== "GET" && csrfToken) headers["X-CSRF-Token"] = csrfToken;
-    const request = async () => {
+    const request = async (signal) => {
       const response = await fetch(path, {
         method,
         credentials: "same-origin",
         headers,
-        body: options.body === undefined ? undefined : JSON.stringify(options.body)
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        signal
       });
       let payload = {};
       try { payload = await response.json(); } catch {}
@@ -99,14 +101,19 @@
       }
       return payload;
     };
-    const attempts = method === "GET" ? 4 : 1;
+    const attempts = method === "GET" ? 6 : 1;
+    const backoff = [1500, 3000, 6000, 10000, 15000];
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const controller = method === "GET" ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), 30000) : null;
       try {
-        return await request();
+        return await request(controller ? controller.signal : undefined);
       } catch (error) {
         const retryable = method === "GET" && (!error.status || error.status >= 500);
         if (!retryable || attempt === attempts - 1) throw error;
-        await wait([1200, 3000, 6000][attempt] || 6000);
+        await wait(backoff[attempt] || 15000);
+      } finally {
+        if (timer) clearTimeout(timer);
       }
     }
   };
@@ -126,12 +133,27 @@
     }
     return payload;
   };
+  const PUBLIC_STATE_KEYS = ["schemaVersion", "works", "authors", "activities", "announcements", "bookShares", "monthlyPicks", "monthlyAwards", "topics", "rankings", "rankingWeights"];
+  const cachePublicState = () => {
+    try {
+      const snapshot = {};
+      PUBLIC_STATE_KEYS.forEach((key) => { if (state[key] !== undefined) snapshot[key] = state[key]; });
+      localStorage.setItem(PUBLIC_CACHE_KEY, JSON.stringify(snapshot));
+    } catch {}
+  };
+  const readPublicCache = () => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(PUBLIC_CACHE_KEY) || "null");
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch { return null; }
+  };
   const applyBootstrap = (payload) => {
     if (!payload || typeof payload !== "object") return;
     if (payload.csrfToken) csrfToken = payload.csrfToken;
     if (payload.state) {
       state = Object.assign(structuredClone(EMPTY_STATE), payload.state);
       activeConversation = state.conversations.find((conversation) => !conversation.hidden)?.id || null;
+      cachePublicState();
     }
   };
   const refreshState = async (shouldRender = false) => {
@@ -1466,14 +1488,32 @@
   });
   window.addEventListener("hashchange", () => { route = location.hash.replace(/^#\/?/, "") || "home"; render(); });
   applyTheme(localStorage.getItem(THEME_KEY) || "qingli");
-  (async () => {
+  const renderBootStatus = (message, canRetry = false) => {
+    app.innerHTML = `<div class="page"><div class="empty">${escapeHtml(message)}${canRetry ? '<div style="margin-top:14px"><button class="button button-primary" type="button" data-retry-boot>重新加载</button></div>' : ""}</div></div>`;
+  };
+  const boot = async () => {
+    const cached = readPublicCache();
+    if (cached) {
+      applyBootstrap({ state: cached });
+      render();
+    } else {
+      renderBootStatus("正在连接服务器，首次访问可能需要一分钟左右，请稍候…");
+    }
     try {
       await refreshState(false);
     } catch {
-      state = loadState();
-      showToast("服务器暂时无法连接，请稍后刷新");
+      if (cached) {
+        showToast("已显示上次内容，正在等待服务器恢复");
+      } else {
+        renderBootStatus("服务器正在唤醒或暂时无法连接，请稍后重试。", true);
+      }
+      return;
     }
     render();
     setTimeout(showAnnouncementQueue, 0);
-  })();
+  };
+  document.addEventListener("click", (event) => {
+    if (event.target.closest("[data-retry-boot]")) boot();
+  });
+  boot();
 })();
