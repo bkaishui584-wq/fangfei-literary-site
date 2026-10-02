@@ -29,10 +29,12 @@ DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(BASE_DIR / "data" / "fangfei
 SESSION_COOKIE = "fangfei_session"
 CSRF_COOKIE = "fangfei_csrf"
 SESSION_DAYS = 14
-MAX_BODY_BYTES = 2 * 1024 * 1024
+MAX_BODY_BYTES = 6 * 1024 * 1024
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_JSON_DEPTH = 8
 MAX_LIST_ITEMS = 100
 MAX_STRING_CHARS = 10000
+MAX_WORK_BODY_CHARS = 20000  # 投稿正文总字数上限，其他字段继续使用通用上限
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 ADMIN_USERNAME_RE = re.compile(r"^[\w\u4e00-\u9fff]{1,32}$", re.UNICODE)
 PUBLIC_ROOTS = {"assets", "css", "images", "js", "vendor"}
@@ -45,6 +47,7 @@ AVATAR_NAME_RE = re.compile(r"^[a-f0-9]{32}[.]webp$")
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 AVATAR_SIZE = 512
 AVATAR_FORMATS = {"JPEG", "MPO", "PNG", "WEBP"}
+BOOK_SHARE_IMAGE_SIZE = 1400
 
 WORK_VISIBILITY = {"PUBLIC", "PRIVATE"}
 WORK_STATUSES = {"draft", "pending", "pending_agent", "pending_review", "published", "rejected", "hidden"}
@@ -164,6 +167,45 @@ CREATE TABLE IF NOT EXISTS works (
 );
 CREATE INDEX IF NOT EXISTS idx_works_author ON works(author_id);
 CREATE INDEX IF NOT EXISTS idx_works_status_created ON works(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS work_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  version_number INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  excerpt TEXT NOT NULL DEFAULT '',
+  body_json TEXT NOT NULL DEFAULT '[]',
+  change_reason TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  UNIQUE (work_id, version_number)
+);
+CREATE INDEX IF NOT EXISTS idx_work_versions_work ON work_versions(work_id, version_number DESC);
+
+CREATE TABLE IF NOT EXISTS book_shares (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  book_title TEXT NOT NULL,
+  book_author TEXT NOT NULL DEFAULT '',
+  recommendation TEXT NOT NULL,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  image_name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'published',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_book_shares_status_created ON book_shares(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_book_shares_user ON book_shares(user_id);
+
+CREATE TABLE IF NOT EXISTS book_share_praises (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  share_id INTEGER NOT NULL REFERENCES book_shares(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, share_id)
+);
+CREATE INDEX IF NOT EXISTS idx_book_share_praises_share ON book_share_praises(share_id);
 
 CREATE TABLE IF NOT EXISTS work_views (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -441,6 +483,7 @@ AUTO_ID_TABLES = {
     "announcements", "monthly_awards", "conversations", "messages",
     "notifications", "reports", "audit_logs", "topics", "risk_events", "plagiarism_checks",
     "agent_runs", "agent_moderation_results", "agent_review_tasks",
+    "work_versions", "book_shares",
 }
 
 
@@ -726,7 +769,7 @@ def request_json() -> dict:
     return payload
 
 
-def validate_json_shape(value, depth: int = 0) -> None:
+def validate_json_shape(value, depth: int = 0, *, body: bool = False) -> None:
     if depth > MAX_JSON_DEPTH:
         abort(400)
     if isinstance(value, dict):
@@ -735,14 +778,14 @@ def validate_json_shape(value, depth: int = 0) -> None:
         for key, child in value.items():
             if len(str(key)) > 80:
                 abort(400)
-            validate_json_shape(child, depth + 1)
+            validate_json_shape(child, depth + 1, body=body or key == "body")
     elif isinstance(value, list):
-        if len(value) > MAX_LIST_ITEMS:
+        if not body and len(value) > MAX_LIST_ITEMS:
             abort(400)
         for child in value:
-            validate_json_shape(child, depth + 1)
+            validate_json_shape(child, depth + 1, body=body)
     elif isinstance(value, str):
-        if len(value) > MAX_STRING_CHARS:
+        if not body and len(value) > MAX_STRING_CHARS:
             abort(400)
 
 
@@ -969,6 +1012,92 @@ def get_work(work_id: int, user_row_value=None):
         else:
             sql += " AND w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'"
     return get_db().execute(sql, params).fetchone()
+
+
+def snapshot_work_version(db, work, reason: str = "") -> int:
+    """把当前作品内容保存为一个历史版本，不改动现有作品行。"""
+    row = db.execute(
+        "SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version FROM work_versions WHERE work_id = ?",
+        (work["id"],),
+    ).fetchone()
+    version_number = int(row["next_version"] or 1)
+    db.execute(
+        """
+        INSERT INTO work_versions (
+          work_id, author_id, version_number, title, category, tags_json,
+          excerpt, body_json, change_reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            work["id"], work["author_id"], version_number, work["title"], work["category"],
+            work["tags_json"], work["excerpt"], work["body_json"], reason[:200], now_ms(),
+        ),
+    )
+    return version_number
+
+
+def save_book_share_image(upload) -> str:
+    raw = upload.read(MAX_IMAGE_BYTES + 1)
+    if not raw:
+        raise ValueError("图片文件为空")
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise ValueError("图片不能超过 5MB")
+    try:
+        with Image.open(io.BytesIO(raw)) as probe:
+            probe.verify()
+        with Image.open(io.BytesIO(raw)) as source:
+            if source.format not in AVATAR_FORMATS:
+                raise ValueError("仅支持 JPG、PNG、WEBP 图片")
+            image = ImageOps.contain(source.convert("RGB"), (BOOK_SHARE_IMAGE_SIZE, BOOK_SHARE_IMAGE_SIZE), method=Image.LANCZOS)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("图片无法识别") from exc
+    buffer = io.BytesIO()
+    image.save(buffer, "WEBP", quality=86, method=6)
+    name = f"{secrets.token_hex(16)}.webp"
+    get_db().execute(
+        "INSERT INTO avatar_blobs (name, content_type, data, created_at) VALUES (?, ?, ?, ?)",
+        (name, "image/webp", buffer.getvalue(), now_ms()),
+    )
+    return name
+
+
+def build_book_shares(db, user_id: int | None) -> list[dict]:
+    rows = db.execute(
+        """
+        SELECT bs.*, u.display_name AS author_name,
+          (SELECT COUNT(*) FROM book_share_praises p WHERE p.share_id = bs.id) AS praise_count,
+          EXISTS(SELECT 1 FROM book_share_praises p WHERE p.share_id = bs.id AND p.user_id = ?) AS praised
+        FROM book_shares bs JOIN users u ON u.id = bs.user_id
+        WHERE (bs.status = 'published' OR bs.user_id = ?) AND bs.status <> 'deleted'
+        ORDER BY bs.created_at DESC LIMIT 200
+        """,
+        (user_id or 0, user_id or 0),
+    ).fetchall()
+    result = []
+    for row in rows:
+        try:
+            tags = json.loads(row["tags_json"] or "[]")
+        except (TypeError, ValueError):
+            tags = []
+        result.append({
+            "id": f"bs{row['id']}",
+            "userId": f"u{row['user_id']}",
+            "author": row["author_name"],
+            "bookTitle": row["book_title"],
+            "bookAuthor": row["book_author"],
+            "recommendation": row["recommendation"],
+            "tags": tags if isinstance(tags, list) else [],
+            "imageUrl": f"/book-share-images/{row['image_name']}" if row["image_name"] else "",
+            "praiseCount": int(row["praise_count"] or 0),
+            "praised": bool(row["praised"]),
+            "mine": bool(user_id and row["user_id"] == user_id),
+            "status": row["status"],
+            "createdAt": iso_time(row["created_at"]),
+            "updatedAt": iso_time(row["updated_at"]),
+        })
+    return result
 
 
 def _ranking_period_start(period: str) -> int:
@@ -1598,18 +1727,28 @@ def build_state(user) -> dict:
 
     announcement_sql = "SELECT * FROM announcements"
     if not is_admin:
-        announcement_sql += " WHERE status = 'published'"
-    announcement_sql += " ORDER BY created_at DESC"
-    announcements = [
-        {
+        announcement_sql += " WHERE status IN ('published', 'pinned')"
+    announcement_sql += " ORDER BY CASE WHEN status = 'pinned' THEN 0 ELSE 1 END, created_at DESC"
+    total_users = int(db.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]) if is_admin else 0
+    announcements = []
+    for row in db.execute(announcement_sql).fetchall():
+        confirmed_count = 0
+        if is_admin:
+            confirmed_count = int(db.execute(
+                "SELECT COUNT(*) AS count FROM notifications WHERE type = 'announcement_confirm' AND link = ?",
+                (f"announcement:{row['id']}",),
+            ).fetchone()["count"])
+        announcements.append({
             "id": f"ann{row['id']}",
             "title": row["title"],
             "content": row["content"],
             "status": row["status"],
+            "pinned": row["status"] == "pinned",
             "at": iso_time(row["created_at"]),
-        }
-        for row in db.execute(announcement_sql).fetchall()
-    ]
+            "updatedAt": iso_time(row["updated_at"]),
+            "confirmedCount": confirmed_count,
+            "unconfirmedCount": max(0, total_users - confirmed_count) if is_admin else 0,
+        })
 
     monthly_visibility = "AND w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'"
     monthly_awards = [
@@ -1646,6 +1785,7 @@ def build_state(user) -> dict:
     liked = []
     favorited = []
     notifications = []
+    announcement_confirms = []
     conversations = []
     message_settings = {"allowStrangers": True, "recallMinutes": 2, "notifications": True}
     reports = []
@@ -1681,6 +1821,13 @@ def build_state(user) -> dict:
             }
             for row in db.execute(
                 "SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100",
+                (user_id,),
+            ).fetchall()
+        ]
+        announcement_confirms = [
+            row["link"].split(":", 1)[1]
+            for row in db.execute(
+                "SELECT link FROM notifications WHERE user_id = ? AND type = 'announcement_confirm' AND link LIKE 'announcement:%'",
                 (user_id,),
             ).fetchall()
         ]
@@ -1919,12 +2066,13 @@ def build_state(user) -> dict:
             ).fetchall()
         ]
 
+    book_shares = build_book_shares(db, user_id)
     current_user = public_user(user) if user else {"id": "", "name": "访客", "role": "guest"}
     if user and user["role"] == "admin":
         current_user["adminLevel"] = admin_level(user)
 
     return {
-        "schemaVersion": 7,
+        "schemaVersion": 8,
         "currentUser": current_user,
         "followed": followed,
         "blocked": blocked,
@@ -1932,10 +2080,12 @@ def build_state(user) -> dict:
         "likedWorks": liked,
         "favoritedWorks": favorited,
         "notifications": notifications,
+        "announcementConfirms": announcement_confirms,
         "works": works,
         "authors": authors,
         "activities": activities,
         "announcements": announcements,
+        "bookShares": book_shares,
         "reports": reports,
         "auditLogs": audit_logs,
         "messageSettings": message_settings,
@@ -2181,7 +2331,10 @@ def save_work(work_id: int | None = None):
     tags_value = payload.get("tags") if isinstance(payload.get("tags"), list) else []
     tags = [clean_text(tag, 20) for tag in tags_value if clean_text(tag, 20)][:10]
     body_value = payload.get("body") if isinstance(payload.get("body"), list) else []
-    body = [clean_text(paragraph, MAX_STRING_CHARS) for paragraph in body_value if clean_text(paragraph, MAX_STRING_CHARS)]
+    body_text = "\n".join(str(part) for part in body_value if part)
+    if len(body_text) > MAX_WORK_BODY_CHARS or word_count(body_value) > MAX_WORK_BODY_CHARS:
+        return json_error(f"正文超过 {MAX_WORK_BODY_CHARS} 字限制", 400)
+    body = [clean_text(paragraph, MAX_WORK_BODY_CHARS) for paragraph in body_value if clean_text(paragraph, MAX_WORK_BODY_CHARS)]
     original_confirmed = bool(payload.get("originalConfirmed"))
     rights_confirmed = bool(payload.get("rightsConfirmed"))
     if action == "submit":
@@ -2229,8 +2382,12 @@ def save_work(work_id: int | None = None):
         existing = db.execute("SELECT * FROM works WHERE id = ? AND author_id = ?", (work_id, g.user["id"])).fetchone()
         if not existing:
             return json_error("作品不存在或无权修改", 404)
-        if existing["status"] not in {"draft", "rejected"}:
-            return json_error("只有草稿或未通过作品可以修改", 409)
+        if existing["status"] not in {"draft", "rejected", "pending", "pending_agent", "pending_review", "published"}:
+            return json_error("当前状态的投稿不能修改", 409)
+        if existing["status"] == "published" and action == "draft":
+            return json_error("已发表作品修改后必须重新提交审核", 409)
+        if existing["status"] == "published":
+            snapshot_work_version(db, existing, "修改已发表作品，保留原版本")
         status = "draft" if action == "draft" else "pending_agent"
         db.execute(
             """
@@ -2290,17 +2447,53 @@ def update_work(work_id: int):
     return save_work(work_id)
 
 
+@app.get("/api/works/<int:work_id>/versions")
+@require_auth
+def list_work_versions(work_id: int):
+    work = get_db().execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
+    if not work:
+        return json_error("作品不存在", 404)
+    if work["author_id"] != g.user["id"] and not (g.user["role"] == "admin" and admin_level(g.user)):
+        return json_error("权限不足", 403)
+    rows = get_db().execute(
+        "SELECT * FROM work_versions WHERE work_id = ? ORDER BY version_number DESC",
+        (work_id,),
+    ).fetchall()
+    versions = []
+    for row in rows:
+        try:
+            tags = json.loads(row["tags_json"] or "[]")
+        except (TypeError, ValueError):
+            tags = []
+        versions.append({
+            "id": f"v{row['id']}",
+            "version": int(row["version_number"]),
+            "title": row["title"],
+            "category": row["category"],
+            "tags": tags if isinstance(tags, list) else [],
+            "excerpt": row["excerpt"],
+            "body": json.loads(row["body_json"] or "[]"),
+            "changeReason": row["change_reason"],
+            "at": iso_time(row["created_at"]),
+        })
+    return json_ok({"versions": versions})
+
+
 @app.post("/api/works/<int:work_id>/delete")
 @require_auth
 def delete_own_work(work_id: int):
     db = get_db()
     work = db.execute("SELECT * FROM works WHERE id = ? AND author_id = ?", (work_id, g.user["id"])).fetchone()
     if not work:
-        return json_error("作品不存在或无权删除", 404)
-    if work["status"] not in {"draft", "rejected"}:
-        return json_error("只有草稿或未通过的作品可以由作者删除", 409)
-    db.execute("DELETE FROM works WHERE id = ? AND author_id = ?", (work_id, g.user["id"]))
-    audit("删除作品", "work", str(work_id), f"作者删除作品《{work['title']}》", g.user["id"])
+        return json_error("作品不存在或无权操作", 404)
+    if work["status"] == "hidden":
+        return json_error("这篇作品已经撤下", 409)
+    note = "作者撤下已发表作品" if work["status"] == "published" else "作者删除投稿"
+    db.execute(
+        "UPDATE works SET status = 'hidden', review_note = ?, updated_at = ? WHERE id = ? AND author_id = ?",
+        (note, now_ms(), work_id, g.user["id"]),
+    )
+    audit("撤下作品" if work["status"] == "published" else "删除投稿", "work", str(work_id), f"{note}《{work['title']}》", g.user["id"])
     db.commit()
     return json_ok(bootstrap_payload())
 
@@ -2636,6 +2829,119 @@ def upload_avatar():
     return json_ok(bootstrap_payload())
 
 
+def book_share_form_payload() -> dict:
+    if request.is_json:
+        payload = request_json()
+    elif request.form:
+        payload = request.form.to_dict()
+    else:
+        abort(415)
+    tags_value = payload.get("tags")
+    if isinstance(tags_value, str):
+        tags_value = [item.strip() for item in re.split(r"[,，]", tags_value) if item.strip()]
+    tags = [clean_text(item, 20) for item in tags_value if clean_text(item, 20)] if isinstance(tags_value, list) else []
+    return {
+        "bookTitle": clean_text(payload.get("bookTitle"), 120, required=True),
+        "bookAuthor": clean_text(payload.get("bookAuthor"), 80),
+        "recommendation": clean_text(payload.get("recommendation"), 2000, required=True),
+        "tags": list(dict.fromkeys(tags))[:8],
+    }
+
+
+@app.get("/book-share-images/<name>")
+def serve_book_share_image(name: str):
+    if not AVATAR_NAME_RE.fullmatch(name):
+        abort(404)
+    row = get_db().execute(
+        "SELECT content_type, data FROM avatar_blobs WHERE name = ?", (name,)
+    ).fetchone()
+    if not row:
+        abort(404)
+    return Response(
+        bytes(row["data"]),
+        mimetype=row["content_type"] or "image/webp",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.post("/api/book-shares")
+@require_auth
+def create_book_share():
+    fields = book_share_form_payload()
+    image_name = ""
+    upload = request.files.get("image")
+    if upload and upload.filename:
+        try:
+            image_name = save_book_share_image(upload)
+        except ValueError as exc:
+            return json_error(str(exc), 413 if "5MB" in str(exc) else 415)
+    timestamp = now_ms()
+    cursor = get_db().execute(
+        """
+        INSERT INTO book_shares (user_id, book_title, book_author, recommendation, tags_json, image_name, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'published', ?, ?)
+        """,
+        (g.user["id"], fields["bookTitle"], fields["bookAuthor"], fields["recommendation"], json.dumps(fields["tags"], ensure_ascii=False), image_name, timestamp, timestamp),
+    )
+    audit("发布书友分享", "book_share", str(cursor.lastrowid), f"发布书友分享《{fields['bookTitle']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/book-shares/<int:share_id>")
+@require_auth
+def update_book_share(share_id: int):
+    row = get_db().execute("SELECT * FROM book_shares WHERE id = ? AND user_id = ?", (share_id, g.user["id"])).fetchone()
+    if not row or row["status"] == "deleted":
+        return json_error("书友分享不存在或无权修改", 404)
+    fields = book_share_form_payload()
+    image_name = row["image_name"] or ""
+    upload = request.files.get("image")
+    if upload and upload.filename:
+        try:
+            image_name = save_book_share_image(upload)
+        except ValueError as exc:
+            return json_error(str(exc), 413 if "5MB" in str(exc) else 415)
+    get_db().execute(
+        """
+        UPDATE book_shares SET book_title = ?, book_author = ?, recommendation = ?, tags_json = ?,
+          image_name = ?, updated_at = ? WHERE id = ? AND user_id = ?
+        """,
+        (fields["bookTitle"], fields["bookAuthor"], fields["recommendation"], json.dumps(fields["tags"], ensure_ascii=False), image_name, now_ms(), share_id, g.user["id"]),
+    )
+    audit("修改书友分享", "book_share", str(share_id), f"修改书友分享《{fields['bookTitle']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/book-shares/<int:share_id>/delete")
+@require_auth
+def delete_book_share(share_id: int):
+    row = get_db().execute("SELECT * FROM book_shares WHERE id = ? AND user_id = ?", (share_id, g.user["id"])).fetchone()
+    if not row or row["status"] == "deleted":
+        return json_error("书友分享不存在或已删除", 404)
+    get_db().execute("UPDATE book_shares SET status = 'deleted', updated_at = ? WHERE id = ? AND user_id = ?", (now_ms(), share_id, g.user["id"]))
+    audit("删除书友分享", "book_share", str(share_id), f"删除书友分享《{row['book_title']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/book-shares/<int:share_id>/praise")
+@require_auth
+def toggle_book_share_praise(share_id: int):
+    row = get_db().execute("SELECT * FROM book_shares WHERE id = ? AND status = 'published'", (share_id,)).fetchone()
+    if not row:
+        return json_error("书友分享不存在", 404)
+    db = get_db()
+    existing = db.execute("SELECT 1 FROM book_share_praises WHERE user_id = ? AND share_id = ?", (g.user["id"], share_id)).fetchone()
+    if existing:
+        db.execute("DELETE FROM book_share_praises WHERE user_id = ? AND share_id = ?", (g.user["id"], share_id))
+    else:
+        db.execute("INSERT OR IGNORE INTO book_share_praises (user_id, share_id, created_at) VALUES (?, ?, ?)", (g.user["id"], share_id, now_ms()))
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
 @app.post("/api/admin/topics")
 @require_admin
 def save_topic():
@@ -2752,9 +3058,22 @@ def toggle_announcement(announcement_id: int):
     row = get_db().execute("SELECT * FROM announcements WHERE id = ?", (announcement_id,)).fetchone()
     if not row:
         return json_error("公告不存在", 404)
-    new_status = "archived" if row["status"] == "published" else "published"
+    new_status = "archived" if row["status"] in {"published", "pinned"} else "published"
     get_db().execute("UPDATE announcements SET status = ?, updated_at = ? WHERE id = ?", (new_status, now_ms(), announcement_id))
     audit("更新公告", "announcement", str(announcement_id), f"{'发布' if new_status == 'published' else '撤回'}公告《{row['title']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/announcements/<int:announcement_id>/pin")
+@require_admin
+def pin_announcement(announcement_id: int):
+    row = get_db().execute("SELECT * FROM announcements WHERE id = ?", (announcement_id,)).fetchone()
+    if not row:
+        return json_error("公告不存在", 404)
+    new_status = "published" if row["status"] == "pinned" else "pinned"
+    get_db().execute("UPDATE announcements SET status = ?, updated_at = ? WHERE id = ?", (new_status, now_ms(), announcement_id))
+    audit("取消置顶公告" if new_status == "published" else "置顶公告", "announcement", str(announcement_id), f"{'取消置顶' if new_status == 'published' else '置顶'}公告《{row['title']}》", g.user["id"])
     get_db().commit()
     return json_ok(bootstrap_payload())
 
@@ -2765,9 +3084,37 @@ def delete_announcement(announcement_id: int):
     row = get_db().execute("SELECT * FROM announcements WHERE id = ?", (announcement_id,)).fetchone()
     if not row:
         return json_error("公告不存在", 404)
-    get_db().execute("DELETE FROM announcements WHERE id = ?", (announcement_id,))
-    audit("删除公告", "announcement", str(announcement_id), f"删除公告《{row['title']}》", g.user["id"])
+    get_db().execute("UPDATE announcements SET status = 'archived', updated_at = ? WHERE id = ?", (now_ms(), announcement_id))
+    audit("归档公告", "announcement", str(announcement_id), f"归档公告《{row['title']}》", g.user["id"])
     get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/announcements/<int:announcement_id>/confirm")
+@require_auth
+def confirm_announcement(announcement_id: int):
+    db = get_db()
+    row = db.execute(
+        "SELECT id, title, status FROM announcements WHERE id = ? AND status IN ('published', 'pinned')",
+        (announcement_id,),
+    ).fetchone()
+    if not row:
+        return json_error("公告不存在或已撤回", 404)
+    link = f"announcement:{announcement_id}"
+    existing = db.execute(
+        "SELECT id FROM notifications WHERE user_id = ? AND type = 'announcement_confirm' AND link = ? ORDER BY id DESC LIMIT 1",
+        (g.user["id"], link),
+    ).fetchone()
+    confirmed_at = now_ms()
+    if existing:
+        db.execute("UPDATE notifications SET read_at = ? WHERE id = ?", (confirmed_at, existing["id"]))
+    else:
+        db.execute(
+            "INSERT INTO notifications (user_id, type, text, link, created_at, read_at) VALUES (?, 'announcement_confirm', ?, ?, ?, ?)",
+            (g.user["id"], f"已确认公告《{row['title']}》", link, confirmed_at, confirmed_at),
+        )
+    audit("确认公告", "announcement", str(announcement_id), f"确认公告《{row['title']}》", g.user["id"])
+    db.commit()
     return json_ok(bootstrap_payload())
 
 
@@ -2807,13 +3154,16 @@ def delete_work(work_id: int):
     if not work:
         return json_error("作品不存在", 404)
     db = get_db()
-    db.execute("DELETE FROM works WHERE id = ?", (work_id,))
+    db.execute(
+        "UPDATE works SET status = 'hidden', review_note = '管理员下架', updated_at = ? WHERE id = ?",
+        (now_ms(), work_id),
+    )
     db.execute(
         "UPDATE reports SET status = '已处理', handled_at = ?, handled_by = ? WHERE target_id IN (?, ?) AND status <> '已处理'",
         (now_ms(), g.user["id"], str(work_id), f"w{work_id}"),
     )
-    notify(work["author_id"], f"作品《{work['title']}》已被管理员删除。", "work")
-    audit("删除作品", "work", str(work_id), f"删除作品《{work['title']}》", g.user["id"])
+    notify(work["author_id"], f"作品《{work['title']}》已被管理员下架。", "work")
+    audit("下架作品", "work", str(work_id), f"管理员下架作品《{work['title']}》", g.user["id"])
     db.commit()
     return json_ok(bootstrap_payload())
 
@@ -2851,6 +3201,10 @@ def update_report_status(report_id: int):
         target_work = parse_numeric_id(row["target_id"])
         if target_work:
             get_db().execute("UPDATE works SET status = 'hidden', updated_at = ? WHERE id = ?", (now_ms(), target_work))
+    elif action in {"暂时隐藏", "确认侵权并下架"} and row["type"] == "书友分享":
+        target_share = parse_numeric_id(row["target_id"])
+        if target_share:
+            get_db().execute("UPDATE book_shares SET status = 'hidden', updated_at = ? WHERE id = ?", (now_ms(), target_share))
     audit("处理举报", "report", str(report_id), f"举报状态更新为{status}" + (f"，动作：{action}" if action else ""), g.user["id"])
     get_db().commit()
     return json_ok(bootstrap_payload())
