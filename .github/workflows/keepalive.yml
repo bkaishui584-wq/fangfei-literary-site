@@ -1,0 +1,24 @@
+name: keepalive
+
+# Render 免费实例闲置 15 分钟会休眠。这里每 10 分钟 ping 一次，
+# 让主站保持唤醒，避免访客打开时看到“正在唤醒服务器”。
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping 芳菲文学社主站
+        run: |
+          for url in \
+            "https://fangfei-literary-v2.onrender.com/api/bootstrap" \
+            "https://fangfei-literary-site.onrender.com/api/bootstrap"; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 "$url" || echo "000")
+            echo "$url -> $code"
+          done
