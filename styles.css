@@ -480,6 +480,12 @@ html, body { overflow-x: hidden; }
 .button.is-active { color: #fff; background: var(--jade-dark); border-color: var(--jade-dark); }
 .reading-content { max-width: 68ch; margin: 42px auto 0; overflow-wrap: anywhere; }
 .reading-content p { white-space: pre-wrap; }
+/* 统一保留用户多行内容的换行：评论、私信、话题、活动、简介、推荐理由、审核意见 */
+.review-note, .author-card p, .author-brief p, .profile-hero p, .comment p,
+.message-bubble, .activity-card p, .topic-card p, .monthly-card p, .page-note {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .author-brief { display: grid; gap: 10px; }
 .author-brief .avatar { width: 54px; height: 54px; border-radius: 50%; }
 .author-brief h2 { margin: 0; font-family: var(--serif); }

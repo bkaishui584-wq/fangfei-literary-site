@@ -52,7 +52,10 @@ AGENT_POLICY_VERSION = "fangfei-agent-1.0"
 AGENT_MODEL_NAME = "rules-v1"
 TOPIC_STATUSES = {"DRAFT", "PUBLISHED", "ENDED", "ARCHIVED"}
 
-# 有效作品的类型最低字数，集中配置，供排行榜与统计复用
+# Agent 审核的字数参考值（用户要求：由类型最低字数下调为 5 字）
+AGENT_MIN_WORDS = 5
+
+# 有效作品的类型最低字数，集中配置，供排行榜与统计复用（排行榜口径未改动）
 MIN_WORDS_BY_CATEGORY = {
     "小说": 800,
     "剧本": 500,
@@ -1143,10 +1146,10 @@ def evaluate_work_content(db, author_id: int, body, category: str, work_id: int 
     signals: list[str] = []
     score = 0
     words = word_count(body)
-    minimum = min_words_for(category)
+    minimum = AGENT_MIN_WORDS
     if words < minimum:
         score += 2
-        signals.append(f"字数低于类型参考值 {minimum}")
+        signals.append(f"字数低于审核参考值 {minimum}")
     similarity = detect_similarity(db, text, exclude_work_id=work_id)
     if similarity["level"] == "high":
         score += 5
