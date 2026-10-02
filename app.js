@@ -67,6 +67,7 @@
   const toast = document.querySelector("#toast");
   let csrfToken = "";
   let actionBusy = false;
+  let authBusy = false;
   let dialogResolver = null;
   const numericId = (value) => Number(String(value || "").replace(/^[^\d]*/, ""));
   const apiRequest = async (path, options = {}) => {
@@ -220,11 +221,14 @@
       </form>
     `;
     openModal(register ? "注册账号" : "登录", html, '<div class="modal-actions"><button class="button button-primary" type="submit" form="auth-form">' + (register ? "创建账号" : "登录") + '</button></div>');
+    const authSubmit = document.querySelector('.modal-footer button[form="auth-form"]');
+    const authSubmitLabel = authSubmit ? authSubmit.textContent : "";
     document.querySelectorAll("[data-auth-mode]").forEach((button) => {
       button.addEventListener("click", () => openAuth(button.dataset.authMode));
     });
     document.querySelector("#auth-form").addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (authBusy) return;
       const form = event.currentTarget;
       if (!form.reportValidity()) return;
       const data = new FormData(form);
@@ -232,6 +236,11 @@
       if (register && password !== String(data.get("confirmPassword") || "")) {
         showToast("两次输入的密码不一致");
         return;
+      }
+      authBusy = true;
+      if (authSubmit) {
+        authSubmit.disabled = true;
+        authSubmit.textContent = register ? "注册中..." : "登录中...";
       }
       try {
         const body = register
@@ -243,6 +252,12 @@
         showToast(register ? "账号已创建" : "登录成功");
       } catch (error) {
         handleApiError(error);
+      } finally {
+        authBusy = false;
+        if (authSubmit && authSubmit.isConnected) {
+          authSubmit.disabled = false;
+          authSubmit.textContent = authSubmitLabel;
+        }
       }
     });
   }

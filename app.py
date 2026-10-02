@@ -2056,8 +2056,8 @@ def bootstrap():
 
 @app.post("/api/auth/register")
 def register():
-    if not rate_limit("register", 8, 3600):
-        return json_error("注册尝试过于频繁", 429)
+    # 注册接口已按要求取消频率限制：正常用户不再因连续提交被判为频繁。
+    # 下面仍保留 register_burst 风险记录（只写风控信号，不拦截注册）。
     payload = request_json()
     username = clean_text(payload.get("username"), 32, required=True)
     display_name = clean_text(payload.get("displayName"), 40, required=True)
@@ -2069,10 +2069,17 @@ def register():
     db = get_db()
     if db.execute("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone():
         return json_error("该用户名已被使用", 409)
-    cursor = db.execute(
-        "INSERT INTO users (username, display_name, password_hash, role, bio, created_at) VALUES (?, ?, ?, 'reader', '', ?)",
-        (username, display_name, generate_password_hash(password), now_ms()),
-    )
+    try:
+        cursor = db.execute(
+            "INSERT INTO users (username, display_name, password_hash, role, bio, created_at) VALUES (?, ?, ?, 'reader', '', ?)",
+            (username, display_name, generate_password_hash(password), now_ms()),
+        )
+    except Exception:
+        # 并发重复提交时唯一约束会拒绝第二次写入；不覆盖已有账户，只返回同样的提示
+        db.rollback()
+        if db.execute("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (username,)).fetchone():
+            return json_error("该用户名已被使用", 409)
+        raise
     user_id = cursor.lastrowid
     if not rate_limit("register_burst", 3, 3600):
         record_risk(db, user_id, "register_burst", "同一来源一小时内注册多个账号", level="MEDIUM", target_type="user", target_id=str(user_id))
