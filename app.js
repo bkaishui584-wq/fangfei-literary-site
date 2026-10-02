@@ -77,25 +77,38 @@
   let authBusy = false;
   let dialogResolver = null;
   const numericId = (value) => Number(String(value || "").replace(/^[^\d]*/, ""));
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const apiRequest = async (path, options = {}) => {
     const method = options.method || "GET";
     const headers = Object.assign({ Accept: "application/json" }, options.headers || {});
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
     if (method !== "GET" && csrfToken) headers["X-CSRF-Token"] = csrfToken;
-    const response = await fetch(path, {
-      method,
-      credentials: "same-origin",
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body)
-    });
-    let payload = {};
-    try { payload = await response.json(); } catch {}
-    if (!response.ok) {
-      const error = new Error(payload.error || "请求失败，请稍后重试");
-      error.status = response.status;
-      throw error;
+    const request = async () => {
+      const response = await fetch(path, {
+        method,
+        credentials: "same-origin",
+        headers,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body)
+      });
+      let payload = {};
+      try { payload = await response.json(); } catch {}
+      if (!response.ok) {
+        const error = new Error(payload.error || "请求失败，请稍后重试");
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    };
+    const attempts = method === "GET" ? 4 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await request();
+      } catch (error) {
+        const retryable = method === "GET" && (!error.status || error.status >= 500);
+        if (!retryable || attempt === attempts - 1) throw error;
+        await wait([1200, 3000, 6000][attempt] || 6000);
+      }
     }
-    return payload;
   };
   const apiFormRequest = async (path, formData) => {
     const response = await fetch(path, {
