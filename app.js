@@ -101,11 +101,11 @@
       }
       return payload;
     };
-    const attempts = method === "GET" ? 6 : 1;
-    const backoff = [1500, 3000, 6000, 10000, 15000];
+    const attempts = method === "GET" ? 5 : 1;
+    const backoff = [2500, 5000, 10000, 15000];
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const controller = method === "GET" ? new AbortController() : null;
-      const timer = controller ? setTimeout(() => controller.abort(), 30000) : null;
+      const controller = method === "GET" && typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), 55000) : null;
       try {
         return await request(controller ? controller.signal : undefined);
       } catch (error) {
@@ -1489,26 +1489,36 @@
   window.addEventListener("hashchange", () => { route = location.hash.replace(/^#\/?/, "") || "home"; render(); });
   applyTheme(localStorage.getItem(THEME_KEY) || "qingli");
   const renderBootStatus = (message, canRetry = false) => {
-    app.innerHTML = `<div class="page"><div class="empty">${escapeHtml(message)}${canRetry ? '<div style="margin-top:14px"><button class="button button-primary" type="button" data-retry-boot>重新加载</button></div>' : ""}</div></div>`;
+    app.innerHTML = `<div class="page"><div class="empty"><p data-boot-message>${escapeHtml(message)}</p>${canRetry ? '<div style="margin-top:14px"><button class="button button-primary" type="button" data-retry-boot>重新加载</button></div>' : ""}</div></div>`;
   };
+  let bootTicker = null;
   const boot = async () => {
+    const startedAt = Date.now();
     const cached = readPublicCache();
     if (cached) {
       applyBootstrap({ state: cached });
       render();
     } else {
-      renderBootStatus("正在连接服务器，首次访问可能需要一分钟左右，请稍候…");
+      renderBootStatus("正在唤醒服务器，请稍候…");
     }
+    if (bootTicker) clearInterval(bootTicker);
+    bootTicker = setInterval(() => {
+      const el = document.querySelector("[data-boot-message]");
+      if (!el) return;
+      el.textContent = `正在唤醒服务器，请稍候…（已等待 ${Math.round((Date.now() - startedAt) / 1000)} 秒）`;
+    }, 1000);
     try {
       await refreshState(false);
     } catch {
+      clearInterval(bootTicker); bootTicker = null;
       if (cached) {
         showToast("已显示上次内容，正在等待服务器恢复");
       } else {
-        renderBootStatus("服务器正在唤醒或暂时无法连接，请稍后重试。", true);
+        renderBootStatus("服务器暂时无法连接，请点击重新加载。", true);
       }
       return;
     }
+    clearInterval(bootTicker); bootTicker = null;
     render();
     setTimeout(showAnnouncementQueue, 0);
   };
