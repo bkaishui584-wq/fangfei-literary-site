@@ -2107,15 +2107,28 @@ def build_state(user) -> dict:
     }
 
 
+# 访客状态与登录用户无关，且读多写少；短缓存可省下每次请求几十次数据库往返。
+_GUEST_STATE_CACHE = {"at": 0.0, "state": None}
+GUEST_STATE_TTL = 15
+
+
 def bootstrap_payload() -> dict:
     user = current_user_row()
     if user:
         # 写操作后重新读取当前用户，避免响应里返回修改前的缓存行
         user = get_db().execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
         g.user = user
+        return {
+            "csrfToken": get_csrf_value(),
+            "state": build_state(user),
+        }
+    now = time.time()
+    if _GUEST_STATE_CACHE["state"] is None or now - _GUEST_STATE_CACHE["at"] > GUEST_STATE_TTL:
+        _GUEST_STATE_CACHE["state"] = build_state(None)
+        _GUEST_STATE_CACHE["at"] = now
     return {
         "csrfToken": get_csrf_value(),
-        "state": build_state(user),
+        "state": _GUEST_STATE_CACHE["state"],
     }
 
 

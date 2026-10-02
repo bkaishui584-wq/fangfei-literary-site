@@ -1492,13 +1492,15 @@
     app.innerHTML = `<div class="page"><div class="empty"><p data-boot-message>${escapeHtml(message)}</p>${canRetry ? '<div style="margin-top:14px"><button class="button button-primary" type="button" data-retry-boot>重新加载</button></div>' : ""}</div></div>`;
   };
   let bootTicker = null;
+  let bootAttempts = 0;
   const boot = async () => {
+    bootAttempts += 1;
     const startedAt = Date.now();
     const cached = readPublicCache();
     if (cached) {
       applyBootstrap({ state: cached });
       render();
-    } else {
+    } else if (bootAttempts === 1) {
       renderBootStatus("正在唤醒服务器，请稍候…");
     }
     if (bootTicker) clearInterval(bootTicker);
@@ -1513,6 +1515,10 @@
       clearInterval(bootTicker); bootTicker = null;
       if (cached) {
         showToast("已显示上次内容，正在等待服务器恢复");
+      }
+      if (bootAttempts < 4) {
+        if (!cached) renderBootStatus(`服务器暂时无法连接，正在自动重试（第 ${bootAttempts} 次）…`, true);
+        setTimeout(boot, 20000);
       } else {
         renderBootStatus("服务器暂时无法连接，请点击重新加载。", true);
       }
@@ -1523,7 +1529,7 @@
     setTimeout(showAnnouncementQueue, 0);
   };
   document.addEventListener("click", (event) => {
-    if (event.target.closest("[data-retry-boot]")) boot();
+    if (event.target.closest("[data-retry-boot]")) { bootAttempts = 0; boot(); }
   });
   boot();
 })();
