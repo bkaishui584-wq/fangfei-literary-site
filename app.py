@@ -1452,46 +1452,59 @@ def remove_old_avatar(value: str) -> None:
 def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) -> dict:
     periods = {name: _ranking_period_start(name) for name in ("month", "quarter", "year", "all")}
     author_names = {item.get("id"): item.get("name", "") for item in (authors or [])}
+    work_rows = db.execute(
+        """
+        SELECT w.id, w.author_id, w.title, w.category, w.excerpt, w.views, w.body_json,
+               w.published_at, w.created_at, u.display_name AS author_name
+        FROM works w JOIN users u ON u.id = w.author_id
+        WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'
+        ORDER BY COALESCE(w.published_at, w.created_at) DESC
+        """
+    ).fetchall()
+
+    # 每个指标只做一次分组统计，避免逐作品逐时间范围查询导致上百次数据库往返
+    metric_specs = (
+        ("views", "work_views", "viewed_at", ""),
+        ("likes", "likes", "created_at", "effective = 1"),
+        ("favorites", "favorites", "created_at", ""),
+        ("comments", "comments", "created_at", "deleted_at IS NULL AND effective = 1"),
+    )
+    metric_counts: dict[str, dict[str, dict[int, int]]] = {}
+    for key, table, column, extra in metric_specs:
+        where = f" WHERE {extra}" if extra else ""
+        rows = db.execute(
+            f"""
+            SELECT work_id, COUNT(*) AS total,
+                   SUM(CASE WHEN {column} >= ? THEN 1 ELSE 0 END) AS recent_month,
+                   SUM(CASE WHEN {column} >= ? THEN 1 ELSE 0 END) AS recent_quarter,
+                   SUM(CASE WHEN {column} >= ? THEN 1 ELSE 0 END) AS recent_year
+            FROM {table}{where}
+            GROUP BY work_id
+            """,
+            (periods["month"], periods["quarter"], periods["year"]),
+        ).fetchall()
+        per_period: dict[str, dict[int, int]] = {name: {} for name in periods}
+        for item in rows:
+            work_id = int(item["work_id"])
+            per_period["all"][work_id] = int(item["total"] or 0)
+            per_period["month"][work_id] = int(item["recent_month"] or 0)
+            per_period["quarter"][work_id] = int(item["recent_quarter"] or 0)
+            per_period["year"][work_id] = int(item["recent_year"] or 0)
+        metric_counts[key] = per_period
+
     rankings: dict[str, dict] = {}
     for period, start in periods.items():
-        work_rows = db.execute(
-            """
-            SELECT w.id, w.author_id, w.title, w.category, w.excerpt, w.views, w.body_json,
-                   w.published_at, w.created_at, u.display_name AS author_name
-            FROM works w JOIN users u ON u.id = w.author_id
-            WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'
-            ORDER BY COALESCE(w.published_at, w.created_at) DESC
-            """
-        ).fetchall()
         work_items = []
         author_stats: dict[str, dict] = {}
         for row in work_rows:
             work_id = row["id"]
             if start:
-                views = db.execute(
-                    "SELECT COUNT(*) AS count FROM work_views WHERE work_id = ? AND viewed_at >= ?",
-                    (work_id, start),
-                ).fetchone()["count"]
-                likes = db.execute(
-                    "SELECT COUNT(*) AS count FROM likes WHERE work_id = ? AND effective = 1 AND created_at >= ?",
-                    (work_id, start),
-                ).fetchone()["count"]
-                favorites = db.execute(
-                    "SELECT COUNT(*) AS count FROM favorites WHERE work_id = ? AND created_at >= ?",
-                    (work_id, start),
-                ).fetchone()["count"]
-                comments = db.execute(
-                    "SELECT COUNT(*) AS count FROM comments WHERE work_id = ? AND deleted_at IS NULL AND effective = 1 AND created_at >= ?",
-                    (work_id, start),
-                ).fetchone()["count"]
+                views = metric_counts["views"][period].get(int(work_id), 0)
             else:
                 views = int(row["views"] or 0)
-                likes = db.execute("SELECT COUNT(*) AS count FROM likes WHERE work_id = ? AND effective = 1", (work_id,)).fetchone()["count"]
-                favorites = db.execute("SELECT COUNT(*) AS count FROM favorites WHERE work_id = ?", (work_id,)).fetchone()["count"]
-                comments = db.execute(
-                    "SELECT COUNT(*) AS count FROM comments WHERE work_id = ? AND deleted_at IS NULL AND effective = 1",
-                    (work_id,),
-                ).fetchone()["count"]
+            likes = metric_counts["likes"][period].get(int(work_id), 0)
+            favorites = metric_counts["favorites"][period].get(int(work_id), 0)
+            comments = metric_counts["comments"][period].get(int(work_id), 0)
             score = (
                 views * RANKING_WEIGHTS["views"]
                 + likes * RANKING_WEIGHTS["likes"]
@@ -1628,18 +1641,25 @@ def build_state(user) -> dict:
         else:
             works_sql += " WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'"
     works_sql += " ORDER BY COALESCE(w.published_at, w.created_at) DESC"
-    works = []
-    for row in db.execute(works_sql, params).fetchall():
-        comments = []
+    work_rows = db.execute(works_sql, params).fetchall()
+    comments_by_work: dict[int, list] = {}
+    if work_rows:
+        placeholders = ", ".join("?" for _ in work_rows)
         for comment in db.execute(
-            """
+            f"""
             SELECT c.*, u.display_name AS author_name
             FROM comments c JOIN users u ON u.id = c.user_id
-            WHERE c.work_id = ? AND c.deleted_at IS NULL
+            WHERE c.deleted_at IS NULL AND c.work_id IN ({placeholders})
             ORDER BY c.created_at ASC
             """,
-            (row["id"],),
+            [row["id"] for row in work_rows],
         ).fetchall():
+            comments_by_work.setdefault(int(comment["work_id"]), []).append(comment)
+
+    works = []
+    for row in work_rows:
+        comments = []
+        for comment in comments_by_work.get(int(row["id"]), []):
             comments.append(
                 {
                     "id": f"c{comment['id']}",
