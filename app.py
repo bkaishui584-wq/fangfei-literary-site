@@ -10,6 +10,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import urllib.request
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
@@ -3422,7 +3423,31 @@ def transfer_admin():
     return json_ok(bootstrap_payload())
 
 
+
+KEEPALIVE_SECONDS = int(os.getenv("KEEPALIVE_SECONDS", "600"))
+
+
+def _start_keepalive() -> None:
+    """Render 免费实例闲置 15 分钟会休眠；定时请求自己的公开地址即可保持唤醒。"""
+    base = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if not base:
+        return
+    target = f"{base}/api/bootstrap"
+
+    def loop() -> None:
+        while True:
+            time.sleep(KEEPALIVE_SECONDS)
+            try:
+                with urllib.request.urlopen(target, timeout=90) as response:
+                    response.read(64)
+            except Exception:
+                pass
+
+    threading.Thread(target=loop, daemon=True, name="fangfei-keepalive").start()
+
+
 init_db()
+_start_keepalive()
 
 
 if __name__ == "__main__":
