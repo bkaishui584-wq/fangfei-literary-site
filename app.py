@@ -41,6 +41,9 @@ ADMIN_USERNAME_RE = re.compile(r"^[\w\u4e00-\u9fff]{1,32}$", re.UNICODE)
 PUBLIC_ROOTS = {"assets", "css", "images", "js", "vendor"}
 PUBLIC_FILES = {"app.js", "styles.css", "pet.js", "favicon.ico"}
 WORK_CATEGORIES = {"小说", "诗歌", "散文", "随笔", "剧本", "科幻", "杂文", "其他"}
+WORK_FORMATS = {"single", "serial"}
+SERIAL_STATUSES = {"ONGOING", "COMPLETED", "HIATUS"}
+SHELF_STATUSES = {"READING", "FINISHED"}
 PROFILE_COVER_THEMES = {"starry", "deepsea", "sky", "flower", "dragon", "qingli", ""}
 RANKING_WEIGHTS = {"views": 1, "likes": 8, "favorites": 10, "comments": 4}
 
@@ -151,6 +154,8 @@ CREATE TABLE IF NOT EXISTS works (
   author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   category TEXT NOT NULL,
+  work_format TEXT NOT NULL DEFAULT 'single',
+  serial_status TEXT NOT NULL DEFAULT 'ONGOING',
   tags_json TEXT NOT NULL DEFAULT '[]',
   excerpt TEXT NOT NULL DEFAULT '',
   body_json TEXT NOT NULL DEFAULT '[]',
@@ -168,6 +173,70 @@ CREATE TABLE IF NOT EXISTS works (
 );
 CREATE INDEX IF NOT EXISTS idx_works_author ON works(author_id);
 CREATE INDEX IF NOT EXISTS idx_works_status_created ON works(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS chapters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  chapter_number INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'DRAFT',
+  review_note TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  published_at INTEGER,
+  UNIQUE (work_id, chapter_number)
+);
+CREATE INDEX IF NOT EXISTS idx_chapters_work_number ON chapters(work_id, chapter_number);
+
+CREATE TABLE IF NOT EXISTS bookshelf (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'READING',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (user_id, work_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bookshelf_user ON bookshelf(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS reading_progress (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  last_chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+  last_read_at INTEGER NOT NULL,
+  UNIQUE (user_id, work_id)
+);
+CREATE INDEX IF NOT EXISTS idx_reading_progress_user ON reading_progress(user_id, last_read_at DESC);
+
+CREATE TABLE IF NOT EXISTS work_follows (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, work_id)
+);
+CREATE INDEX IF NOT EXISTS idx_work_follows_work ON work_follows(work_id);
+
+CREATE TABLE IF NOT EXISTS chapter_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  parent_id INTEGER REFERENCES chapter_comments(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  deleted_at INTEGER,
+  effective INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_comments_chapter_created ON chapter_comments(chapter_id, created_at);
+
+CREATE TABLE IF NOT EXISTS chapter_comment_likes (
+  comment_id INTEGER NOT NULL REFERENCES chapter_comments(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (comment_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_comment_likes_user ON chapter_comment_likes(user_id);
 
 CREATE TABLE IF NOT EXISTS work_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -345,6 +414,8 @@ CREATE TABLE IF NOT EXISTS notifications (
   type TEXT NOT NULL DEFAULT 'system',
   text TEXT NOT NULL,
   link TEXT NOT NULL DEFAULT '',
+  work_id INTEGER,
+  chapter_id INTEGER,
   created_at INTEGER NOT NULL,
   read_at INTEGER
 );
@@ -484,7 +555,7 @@ AUTO_ID_TABLES = {
     "announcements", "monthly_awards", "conversations", "messages",
     "notifications", "reports", "audit_logs", "topics", "risk_events", "plagiarism_checks",
     "agent_runs", "agent_moderation_results", "agent_review_tasks",
-    "work_versions", "book_shares",
+    "work_versions", "book_shares", "chapters", "bookshelf", "reading_progress", "chapter_comments",
 }
 
 
@@ -606,6 +677,8 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
             "risk_level": "TEXT NOT NULL DEFAULT 'LOW'",
         },
         "works": {
+            "work_format": "TEXT NOT NULL DEFAULT 'single'",
+            "serial_status": "TEXT NOT NULL DEFAULT 'ONGOING'",
             "is_public": "INTEGER NOT NULL DEFAULT 1",
             "allow_comments": "INTEGER NOT NULL DEFAULT 1",
             "allow_favorites": "INTEGER NOT NULL DEFAULT 1",
@@ -621,6 +694,10 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
         "reports": {
             "suspected_original_url": "TEXT NOT NULL DEFAULT ''",
             "handled_action": "TEXT NOT NULL DEFAULT ''",
+        },
+        "notifications": {
+            "work_id": "INTEGER",
+            "chapter_id": "INTEGER",
         },
     }
     for table, columns in migrations.items():
@@ -983,11 +1060,35 @@ def audit(action: str, target_type: str = "", target_id: str = "", detail: str =
     )
 
 
-def notify(user_id: int, text: str, kind: str = "system", link: str = "") -> None:
+def notify(user_id: int, text: str, kind: str = "system", link: str = "", work_id=None, chapter_id=None) -> None:
     get_db().execute(
-        "INSERT INTO notifications (user_id, type, text, link, created_at) VALUES (?, ?, ?, ?, ?)",
-        (user_id, kind[:40], text[:300], link[:300], now_ms()),
+        "INSERT INTO notifications (user_id, type, text, link, work_id, chapter_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, kind[:40], text[:300], link[:300], work_id, chapter_id, now_ms()),
     )
+
+
+def notify_work_followers(db, work, chapter) -> None:
+    """章节发布后通知追更读者，同一用户与章节只生成一次。"""
+    if not work or not chapter:
+        return
+    if work["status"] != "published" or not bool(row_value(work, "is_public", 1)):
+        return
+    if (row_value(work, "visibility", "PUBLIC") or "PUBLIC") != "PUBLIC":
+        return
+    link = f"#/chapter/ch{chapter['id']}"
+    text = f"《{work['title']}》更新了\n第{int(chapter['chapter_number'])}章：{chapter['title']}"
+    followers = db.execute(
+        "SELECT user_id FROM work_follows WHERE work_id = ? AND user_id <> ?",
+        (work["id"], work["author_id"]),
+    ).fetchall()
+    for follower in followers:
+        existing = db.execute(
+            "SELECT 1 FROM notifications WHERE user_id = ? AND type = 'chapter_update' AND link = ? LIMIT 1",
+            (follower["user_id"], link),
+        ).fetchone()
+        if existing:
+            continue
+        notify(follower["user_id"], text, "chapter_update", link, work["id"], chapter["id"])
 
 
 def ensure_message_settings(user_id: int) -> None:
@@ -1207,19 +1308,29 @@ def evaluate_like_risk(db, user, work) -> tuple[bool, str]:
     return True, ""
 
 
-def evaluate_comment_risk(db, user, work, text: str) -> tuple[bool, str]:
+def evaluate_comment_risk(db, user, work, text: str, chapter_id: int | None = None) -> tuple[bool, str]:
     cfg = RISK_CONFIG
     user_id = user["id"]
     now = now_ms()
     hourly = _recent_count(db, "comments", "user_id = ? AND deleted_at IS NULL AND created_at >= ?", (user_id, now - 3600 * 1000))
+    if chapter_id is not None:
+        hourly += _recent_count(db, "chapter_comments", "user_id = ? AND deleted_at IS NULL AND created_at >= ?", (user_id, now - 3600 * 1000))
     if hourly >= cfg["comment_rate_per_hour"]:
         return False, f"一小时内评论 {hourly + 1} 次，超过 {cfg['comment_rate_per_hour']} 次上限"
-    duplicate = _recent_count(
-        db,
-        "comments",
-        "user_id = ? AND work_id = ? AND text = ? AND created_at >= ?",
-        (user_id, work["id"], text, now - cfg["comment_duplicate_window_ms"]),
-    )
+    if chapter_id is not None:
+        duplicate = _recent_count(
+            db,
+            "chapter_comments",
+            "user_id = ? AND chapter_id = ? AND text = ? AND created_at >= ?",
+            (user_id, chapter_id, text, now - cfg["comment_duplicate_window_ms"]),
+        )
+    else:
+        duplicate = _recent_count(
+            db,
+            "comments",
+            "user_id = ? AND work_id = ? AND text = ? AND created_at >= ?",
+            (user_id, work["id"], text, now - cfg["comment_duplicate_window_ms"]),
+        )
     if duplicate:
         return False, "短时间内重复发表相同评论"
     if _account_age_ms(user) < cfg["new_account_ms"] and hourly >= cfg["new_account_comment_per_hour"]:
@@ -1620,6 +1731,152 @@ def _agent_health(db) -> tuple[str, str]:
     return "正常", f"最近运行 {iso_time(row['created_at'])}，耗时 {int(row['duration'] or 0)}ms"
 
 
+def chapter_body_parts(content: str) -> list[str]:
+    return [part.strip() for part in re.split(r"\n\s*\n", content or "") if part.strip()]
+
+
+def serialize_chapter(row) -> dict:
+    content = row["content"] or ""
+    return {
+        "id": f"ch{row['id']}",
+        "workId": f"w{row['work_id']}",
+        "chapterNumber": int(row["chapter_number"]),
+        "title": row["title"],
+        "content": content,
+        "body": chapter_body_parts(content),
+        "status": row["status"],
+        "reviewNote": row["review_note"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "publishedAt": row["published_at"],
+    }
+
+
+def serialize_chapter_comment(row, user_id, is_admin: bool, liked_ids: set, like_counts: dict) -> dict:
+    comment_id = int(row["id"])
+    author_id = int(row["user_id"])
+    return {
+        "id": f"cc{comment_id}",
+        "chapterId": f"ch{row['chapter_id']}",
+        "parentId": f"cc{row['parent_id']}" if row["parent_id"] else "",
+        "who": row["author_name"],
+        "userId": f"u{author_id}",
+        "text": row["text"],
+        "at": row["created_at"],
+        "likes": int(like_counts.get(comment_id, 0)),
+        "liked": comment_id in liked_ids,
+        "mine": bool(user_id) and author_id == int(user_id),
+        "canDelete": bool(user_id) and (author_id == int(user_id) or is_admin),
+    }
+
+
+def run_chapter_agent_review(chapter_id: int, author_id: int, work_id: int, title: str, content: str) -> dict:
+    """章节沿用现有规则型 Agent 审核器，只把审核结果落到章节状态。"""
+    agent_run_id = f"ar_{uuid.uuid4().hex}"
+    started = time.monotonic()
+    created_at = now_ms()
+    db = get_db()
+    try:
+        result = evaluate_work_content(db, author_id, [content], "", work_id=work_id)
+        duration = max(0, int((time.monotonic() - started) * 1000))
+        db.execute(
+            """
+            INSERT INTO agent_runs (
+              agent_run_id, content_id, content_type, user_id, status, error, created_at,
+              duration, policy_version, model, prompt_version
+            ) VALUES (?, ?, 'chapter', ?, 'completed', '', ?, ?, ?, ?, 'none')
+            """,
+            (agent_run_id, chapter_id, author_id, created_at, duration, AGENT_POLICY_VERSION, AGENT_MODEL_NAME),
+        )
+        db.execute(
+            """
+            INSERT INTO agent_moderation_results (
+              agent_run_id, content_id, content_type, risk_level, category, confidence,
+              recommendation, needs_human_review, details_json, created_at
+            ) VALUES (?, ?, 'chapter', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent_run_id, chapter_id, result["risk_level"], result["category"], result["confidence"],
+                result["recommendation"], int(result["needs_human_review"]),
+                json.dumps(result["signals"], ensure_ascii=False), created_at,
+            ),
+        )
+        if result["recommendation"] == "BLOCK":
+            status = "REJECTED"
+            review_note = "Agent 建议拒绝：" + "；".join(result["signals"])
+            published_at = None
+        elif result["needs_human_review"]:
+            status = "PENDING_REVIEW"
+            review_note = "Agent 建议人工复核：" + "；".join(result["signals"])
+            published_at = None
+        else:
+            status = "PUBLISHED"
+            review_note = ""
+            published_at = created_at
+        db.execute(
+            "UPDATE chapters SET status = ?, review_note = ?, published_at = ?, updated_at = ? WHERE id = ?",
+            (status, review_note, published_at, created_at, chapter_id),
+        )
+        if status == "PUBLISHED":
+            db.execute("UPDATE works SET updated_at = ? WHERE id = ?", (created_at, work_id))
+            published_work = db.execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
+            published_chapter = db.execute("SELECT * FROM chapters WHERE id = ?", (chapter_id,)).fetchone()
+            notify_work_followers(db, published_work, published_chapter)
+        db.commit()
+        audit("章节 Agent 审核", "chapter", str(chapter_id), f"章节《{title}》{status}", None)
+        db.commit()
+        return {"agent_run_id": agent_run_id, "status": status, **result}
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        duration = max(0, int((time.monotonic() - started) * 1000))
+        error_text = f"{type(exc).__name__}: {exc}"[:500]
+        try:
+            db.execute(
+                """
+                INSERT INTO agent_runs (
+                  agent_run_id, content_id, content_type, user_id, status, error, created_at,
+                  duration, policy_version, model, prompt_version
+                ) VALUES (?, ?, 'chapter', ?, 'error', ?, ?, ?, ?, ?, 'none')
+                """,
+                (agent_run_id, chapter_id, author_id, error_text, created_at, duration, AGENT_POLICY_VERSION, AGENT_MODEL_NAME),
+            )
+            db.execute(
+                """
+                INSERT INTO agent_moderation_results (
+                  agent_run_id, content_id, content_type, risk_level, category, confidence,
+                  recommendation, needs_human_review, details_json, created_at
+                ) VALUES (?, ?, 'chapter', 'HIGH', '审核异常', 0, 'REVIEW', 1, ?, ?)
+                """,
+                (agent_run_id, chapter_id, json.dumps(["Agent 执行异常，已转人工复核"], ensure_ascii=False), created_at),
+            )
+            db.execute(
+                "UPDATE chapters SET status = 'PENDING_REVIEW', review_note = ?, updated_at = ? WHERE id = ?",
+                ("Agent 审核异常，已转人工复核。", created_at, chapter_id),
+            )
+            db.commit()
+            audit("章节 Agent 异常", "chapter", str(chapter_id), error_text, None)
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return {
+            "agent_run_id": agent_run_id,
+            "status": "PENDING_REVIEW",
+            "risk_level": "HIGH",
+            "category": "审核异常",
+            "confidence": 0,
+            "recommendation": "REVIEW",
+            "needs_human_review": True,
+            "signals": ["Agent 执行异常，已转人工复核"],
+            "error": error_text,
+        }
+
+
 def build_state(user) -> dict:
     db = get_db()
     user_id = user["id"] if user else None
@@ -1656,6 +1913,46 @@ def build_state(user) -> dict:
             [row["id"] for row in work_rows],
         ).fetchall():
             comments_by_work.setdefault(int(comment["work_id"]), []).append(comment)
+    chapters_by_work: dict[int, list] = {}
+    if work_rows:
+        placeholders = ", ".join("?" for _ in work_rows)
+        for chapter in db.execute(
+            f"SELECT * FROM chapters WHERE work_id IN ({placeholders}) ORDER BY work_id ASC, chapter_number ASC, id ASC",
+            [row["id"] for row in work_rows],
+        ).fetchall():
+            chapters_by_work.setdefault(int(chapter["work_id"]), []).append(chapter)
+    chapter_comments_by_chapter: dict[int, list] = {}
+    chapter_like_counts: dict[int, int] = {}
+    liked_chapter_comments: set[int] = set()
+    chapter_ids = [int(chapter["id"]) for rows in chapters_by_work.values() for chapter in rows]
+    if chapter_ids:
+        placeholders = ", ".join("?" for _ in chapter_ids)
+        for comment in db.execute(
+            f"""
+            SELECT cc.*, u.display_name AS author_name
+            FROM chapter_comments cc JOIN users u ON u.id = cc.user_id
+            WHERE cc.deleted_at IS NULL AND cc.chapter_id IN ({placeholders})
+            ORDER BY cc.created_at ASC
+            """,
+            chapter_ids,
+        ).fetchall():
+            chapter_comments_by_chapter.setdefault(int(comment["chapter_id"]), []).append(comment)
+        comment_ids = [int(row["id"]) for rows in chapter_comments_by_chapter.values() for row in rows]
+        if comment_ids:
+            comment_placeholders = ", ".join("?" for _ in comment_ids)
+            for row in db.execute(
+                f"SELECT comment_id, COUNT(*) AS total FROM chapter_comment_likes WHERE comment_id IN ({comment_placeholders}) GROUP BY comment_id",
+                comment_ids,
+            ).fetchall():
+                chapter_like_counts[int(row["comment_id"])] = int(row["total"])
+            if user_id:
+                liked_chapter_comments = {
+                    int(row["comment_id"])
+                    for row in db.execute(
+                        f"SELECT comment_id FROM chapter_comment_likes WHERE user_id = ? AND comment_id IN ({comment_placeholders})",
+                        [user_id] + comment_ids,
+                    ).fetchall()
+                }
 
     works = []
     for row in work_rows:
@@ -1670,6 +1967,16 @@ def build_state(user) -> dict:
                     "at": comment["created_at"],
                 }
             )
+        visible_chapters = []
+        for chapter in chapters_by_work.get(int(row["id"]), []):
+            if is_admin or int(row["author_id"]) == int(user_id or 0) or chapter["status"] == "PUBLISHED":
+                chapter_data = serialize_chapter(chapter)
+                chapter_data["comments"] = [
+                    serialize_chapter_comment(item, user_id, is_admin, liked_chapter_comments, chapter_like_counts)
+                    for item in chapter_comments_by_chapter.get(int(chapter["id"]), [])
+                ]
+                visible_chapters.append(chapter_data)
+        published_chapters = [chapter for chapter in visible_chapters if chapter["status"] == "PUBLISHED"]
         works.append(
             {
                 "id": f"w{row['id']}",
@@ -1677,6 +1984,8 @@ def build_state(user) -> dict:
                 "author": row["author_name"],
                 "authorId": f"u{row['author_id']}",
                 "category": row["category"],
+                "workFormat": row_value(row, "work_format", "single") or "single",
+                "serialStatus": row_value(row, "serial_status", "ONGOING") or "ONGOING",
                 "tags": json.loads(row["tags_json"] or "[]"),
                 "likes": row["likes_count"],
                 "views": row["views"],
@@ -1702,6 +2011,9 @@ def build_state(user) -> dict:
                 "citationSources": row_value(row, "citation_sources", "") or "",
                 "effectiveLikes": row["effective_likes_count"],
                 "effectiveComments": row["effective_comments_count"],
+                "chapters": visible_chapters,
+                "chapterCount": len(published_chapters),
+                "latestChapter": (published_chapters[-1]["title"] if published_chapters else ""),
                 "effective": is_effective_work(
                     json.loads(row["body_json"] or "[]"), row["category"], row["status"],
                     row_value(row, "visibility", "PUBLIC") or "PUBLIC",
@@ -1801,10 +2113,13 @@ def build_state(user) -> dict:
     monthly_picks = [row["workId"] for row in monthly_awards]
 
     followed = []
+    followed_works = []
     blocked = []
     blocked_users = []
     liked = []
     favorited = []
+    bookshelf = []
+    reading_progress = []
     notifications = []
     announcement_confirms = []
     conversations = []
@@ -1820,6 +2135,7 @@ def build_state(user) -> dict:
 
     if user_id:
         followed = [f"u{row['author_id']}" for row in db.execute("SELECT author_id FROM follows WHERE follower_id = ?", (user_id,)).fetchall()]
+        followed_works = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM work_follows WHERE user_id = ?", (user_id,)).fetchall()]
         blocked_rows = db.execute(
             """
             SELECT u.* FROM blocks b JOIN users u ON u.id = b.blocked_id
@@ -1831,6 +2147,28 @@ def build_state(user) -> dict:
         blocked_users = [public_user(row) for row in blocked_rows]
         liked = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM likes WHERE user_id = ?", (user_id,)).fetchall()]
         favorited = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM favorites WHERE user_id = ?", (user_id,)).fetchall()]
+        bookshelf = [
+            {
+                "id": f"bs{row['id']}",
+                "workId": f"w{row['work_id']}",
+                "status": row["status"],
+                "addedAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }
+            for row in db.execute(
+                "SELECT * FROM bookshelf WHERE user_id = ? ORDER BY updated_at DESC", (user_id,)
+            ).fetchall()
+        ]
+        reading_progress = [
+            {
+                "workId": f"w{row['work_id']}",
+                "chapterId": f"ch{row['last_chapter_id']}",
+                "lastReadAt": row["last_read_at"],
+            }
+            for row in db.execute(
+                "SELECT * FROM reading_progress WHERE user_id = ? ORDER BY last_read_at DESC", (user_id,)
+            ).fetchall()
+        ]
         notifications = [
             {
                 "id": f"n{row['id']}",
@@ -1839,6 +2177,8 @@ def build_state(user) -> dict:
                 "read": bool(row["read_at"]),
                 "type": row["type"],
                 "link": row["link"],
+                "workId": f"w{row['work_id']}" if row["work_id"] else "",
+                "chapterId": f"ch{row['chapter_id']}" if row["chapter_id"] else "",
             }
             for row in db.execute(
                 "SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100",
@@ -1975,6 +2315,8 @@ def build_state(user) -> dict:
         agent_runs = [
             {
                 "runId": row["agent_run_id"],
+                "contentType": row["content_type"],
+                "contentId": f"ch{row['content_id']}" if row["content_type"] == "chapter" else f"w{row['content_id']}",
                 "workId": f"w{row['content_id']}" if row["content_type"] == "work" else "",
                 "userId": f"u{row['user_id']}" if row["user_id"] else "",
                 "status": row["status"],
@@ -1991,6 +2333,8 @@ def build_state(user) -> dict:
         agent_results = [
             {
                 "runId": row["agent_run_id"],
+                "contentType": row["content_type"],
+                "contentId": f"ch{row['content_id']}" if row["content_type"] == "chapter" else f"w{row['content_id']}",
                 "workId": f"w{row['content_id']}" if row["content_type"] == "work" else "",
                 "riskLevel": row["risk_level"],
                 "category": row["category"],
@@ -2093,13 +2437,17 @@ def build_state(user) -> dict:
         current_user["adminLevel"] = admin_level(user)
 
     return {
-        "schemaVersion": 8,
+        "schemaVersion": 13,
         "currentUser": current_user,
         "followed": followed,
+        "followedWorks": followed_works,
         "blocked": blocked,
         "blockedUsers": blocked_users,
         "likedWorks": liked,
         "favoritedWorks": favorited,
+        "bookshelf": bookshelf,
+        "readingProgress": reading_progress,
+        "likedChapterComments": [f"cc{value}" for value in sorted(liked_chapter_comments)],
         "notifications": notifications,
         "announcementConfirms": announcement_confirms,
         "works": works,
@@ -2362,6 +2710,14 @@ def save_work(work_id: int | None = None):
     category = clean_text(payload.get("category") or "其他", 20, required=True)
     if category not in WORK_CATEGORIES:
         return json_error("作品类型无效", 400)
+    work_format = clean_text(payload.get("workFormat") or "single", 10).lower()
+    if work_format not in WORK_FORMATS:
+        return json_error("作品形式无效", 400)
+    serial_status = clean_text(payload.get("serialStatus") or "ONGOING", 20).upper()
+    if serial_status not in SERIAL_STATUSES:
+        return json_error("连载状态无效", 400)
+    if work_format == "single":
+        serial_status = "ONGOING"
     tags_value = payload.get("tags") if isinstance(payload.get("tags"), list) else []
     tags = [clean_text(tag, 20) for tag in tags_value if clean_text(tag, 20)][:10]
     body_value = payload.get("body") if isinstance(payload.get("body"), list) else []
@@ -2397,18 +2753,17 @@ def save_work(work_id: int | None = None):
         cursor = db.execute(
             """
             INSERT INTO works (
-              author_id, title, category, tags_json, excerpt, body_json, status, review_note,
+              author_id, title, category, work_format, serial_status, tags_json, excerpt, body_json, status, review_note,
               is_public, allow_comments, allow_favorites, original_confirmed, rights_confirmed,
               visibility, topic_id, citation_declared, citation_sources,
               created_at, updated_at, published_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                g.user["id"], title, category, json.dumps(tags, ensure_ascii=False), excerpt,
-                json.dumps(body, ensure_ascii=False), status, int(is_public), int(allow_comments),
-                int(allow_favorites), int(original_confirmed), int(rights_confirmed),
-                visibility, topic_id, int(has_citation), citation_sources,
-                timestamp, timestamp, None,
+                g.user["id"], title, category, work_format, serial_status,
+                json.dumps(tags, ensure_ascii=False), excerpt, json.dumps(body, ensure_ascii=False), status,
+                int(is_public), int(allow_comments), int(allow_favorites), int(original_confirmed), int(rights_confirmed),
+                visibility, topic_id, int(has_citation), citation_sources, timestamp, timestamp, None,
             ),
         )
         work_id = cursor.lastrowid
@@ -2425,14 +2780,14 @@ def save_work(work_id: int | None = None):
         status = "draft" if action == "draft" else "pending_agent"
         db.execute(
             """
-            UPDATE works SET title = ?, category = ?, tags_json = ?, excerpt = ?, body_json = ?,
+            UPDATE works SET title = ?, category = ?, work_format = ?, serial_status = ?, tags_json = ?, excerpt = ?, body_json = ?,
               status = ?, review_note = '', is_public = ?, allow_comments = ?, allow_favorites = ?,
               original_confirmed = ?, rights_confirmed = ?, visibility = ?, topic_id = ?,
               citation_declared = ?, citation_sources = ?, updated_at = ?, published_at = NULL
             WHERE id = ? AND author_id = ?
             """,
             (
-                title, category, json.dumps(tags, ensure_ascii=False), excerpt,
+                title, category, work_format, serial_status, json.dumps(tags, ensure_ascii=False), excerpt,
                 json.dumps(body, ensure_ascii=False), status, int(is_public), int(allow_comments),
                 int(allow_favorites), int(original_confirmed), int(rights_confirmed),
                 visibility, topic_id, int(has_citation), citation_sources, timestamp,
@@ -2479,6 +2834,314 @@ def create_work():
 @require_auth
 def update_work(work_id: int):
     return save_work(work_id)
+
+
+def owned_serial_work(work_id: int):
+    work = get_db().execute("SELECT * FROM works WHERE id = ?", (work_id,)).fetchone()
+    if not work:
+        return None
+    if work["author_id"] != g.user["id"] or (work["work_format"] or "single") != "serial" or work["status"] == "hidden":
+        return None
+    return work
+
+
+def owned_chapter(chapter_id: int):
+    chapter = get_db().execute("SELECT * FROM chapters WHERE id = ?", (chapter_id,)).fetchone()
+    if not chapter:
+        return None, None
+    work = owned_serial_work(chapter["work_id"])
+    if not work:
+        return None, None
+    return chapter, work
+
+
+def chapter_input():
+    payload = request_json()
+    action = clean_text(payload.get("action") or "draft", 10)
+    if action not in {"draft", "submit"}:
+        return None, "章节操作无效"
+    title = clean_text(payload.get("title"), 120, required=True)
+    body_value = payload.get("body") if isinstance(payload.get("body"), list) else []
+    body_text = "\n".join(str(part) for part in body_value if part)
+    if len(body_text) > MAX_WORK_BODY_CHARS or word_count(body_value) > MAX_WORK_BODY_CHARS:
+        return None, f"章节正文超过 {MAX_WORK_BODY_CHARS} 字限制"
+    body = [clean_text(paragraph, MAX_WORK_BODY_CHARS) for paragraph in body_value if clean_text(paragraph, MAX_WORK_BODY_CHARS)]
+    if action == "submit" and not body:
+        return None, "提交审核前需要填写章节正文"
+    return (action, title, "\n\n".join(body)), ""
+
+
+@app.post("/api/works/<int:work_id>/chapters")
+@require_auth
+def create_chapter(work_id: int):
+    work = owned_serial_work(work_id)
+    if not work:
+        return json_error("连载作品不存在或无权操作", 404)
+    chapter_data, error = chapter_input()
+    if error:
+        return json_error(error, 400)
+    action, title, content = chapter_data
+    if action == "submit" and work["status"] != "published":
+        return json_error("连载作品发布后才能提交章节审核", 409)
+    db = get_db()
+    timestamp = now_ms()
+    number = int(db.execute("SELECT COALESCE(MAX(chapter_number), 0) + 1 AS next_number FROM chapters WHERE work_id = ?", (work_id,)).fetchone()["next_number"])
+    cursor = db.execute(
+        "INSERT INTO chapters (work_id, chapter_number, title, content, status, review_note, created_at, updated_at) VALUES (?, ?, ?, ?, 'DRAFT', '', ?, ?)",
+        (work_id, number, title, content, timestamp, timestamp),
+    )
+    chapter_id = cursor.lastrowid
+    db.commit()
+    if action == "submit":
+        result = run_chapter_agent_review(chapter_id, g.user["id"], work_id, title, content)
+        label = "已通过 Agent 审核并发布" if result.get("status") == "PUBLISHED" else "已提交，等待人工复核"
+        notify(g.user["id"], f"章节《{title}》{label}。", "chapter", f"#/serial/w{work_id}")
+        audit("提交章节", "chapter", str(chapter_id), f"提交《{title}》", g.user["id"])
+    else:
+        audit("保存章节草稿", "chapter", str(chapter_id), f"保存《{title}》草稿", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/chapters/<int:chapter_id>")
+@require_auth
+def update_chapter(chapter_id: int):
+    chapter, work = owned_chapter(chapter_id)
+    if not chapter or not work:
+        return json_error("章节不存在或无权操作", 404)
+    if chapter["status"] not in {"DRAFT", "REJECTED"}:
+        return json_error("当前章节状态不能编辑", 409)
+    chapter_data, error = chapter_input()
+    if error:
+        return json_error(error, 400)
+    action, title, content = chapter_data
+    if action == "submit" and work["status"] != "published":
+        return json_error("连载作品发布后才能提交章节审核", 409)
+    db = get_db()
+    timestamp = now_ms()
+    db.execute(
+        "UPDATE chapters SET title = ?, content = ?, status = 'DRAFT', review_note = '', published_at = NULL, updated_at = ? WHERE id = ?",
+        (title, content, timestamp, chapter_id),
+    )
+    db.commit()
+    if action == "submit":
+        result = run_chapter_agent_review(chapter_id, g.user["id"], work["id"], title, content)
+        label = "已通过 Agent 审核并发布" if result.get("status") == "PUBLISHED" else "已提交，等待人工复核"
+        notify(g.user["id"], f"章节《{title}》{label}。", "chapter", f"#/serial/w{work['id']}")
+        audit("提交章节", "chapter", str(chapter_id), f"提交《{title}》", g.user["id"])
+    else:
+        audit("保存章节草稿", "chapter", str(chapter_id), f"保存《{title}》草稿", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/chapters/<int:chapter_id>/delete")
+@require_auth
+def delete_chapter(chapter_id: int):
+    chapter, work = owned_chapter(chapter_id)
+    if not chapter or not work:
+        return json_error("章节不存在或无权操作", 404)
+    if chapter["status"] != "DRAFT":
+        return json_error("只能删除章节草稿", 409)
+    db = get_db()
+    db.execute("DELETE FROM chapters WHERE id = ? AND work_id = ?", (chapter_id, work["id"]))
+    audit("删除章节草稿", "chapter", str(chapter_id), f"删除《{chapter['title']}》草稿", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/works/<int:work_id>/chapters/reorder")
+@require_auth
+def reorder_chapters(work_id: int):
+    work = owned_serial_work(work_id)
+    if not work:
+        return json_error("连载作品不存在或无权操作", 404)
+    payload = request_json()
+    order = payload.get("order") if isinstance(payload.get("order"), list) else []
+    chapter_ids = [parse_numeric_id(item) for item in order]
+    if any(not chapter_id for chapter_id in chapter_ids) or len(set(chapter_ids)) != len(chapter_ids):
+        return json_error("章节顺序无效", 400)
+    rows = get_db().execute("SELECT id FROM chapters WHERE work_id = ?", (work_id,)).fetchall()
+    existing = {int(row["id"]) for row in rows}
+    if set(chapter_ids) != existing:
+        return json_error("章节顺序必须包含全部章节", 400)
+    db = get_db()
+    timestamp = now_ms()
+    for index, chapter_id in enumerate(chapter_ids, 1):
+        db.execute("UPDATE chapters SET chapter_number = ?, updated_at = ? WHERE id = ? AND work_id = ?", (-index, timestamp, chapter_id, work_id))
+    for index, chapter_id in enumerate(chapter_ids, 1):
+        db.execute("UPDATE chapters SET chapter_number = ? WHERE id = ? AND work_id = ?", (index, chapter_id, work_id))
+    audit("调整章节顺序", "work", str(work_id), "调整连载章节顺序", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/shelf/<int:work_id>")
+@require_auth
+def update_shelf(work_id: int):
+    work = public_work(work_id)
+    if not work:
+        return json_error("作品不存在或尚未公开", 404)
+    payload = request_json()
+    status = clean_text(payload.get("status") or "READING", 12)
+    if status not in SHELF_STATUSES:
+        return json_error("书架状态无效", 400)
+    db = get_db()
+    timestamp = now_ms()
+    cursor = db.execute(
+        "UPDATE bookshelf SET status = ?, updated_at = ? WHERE user_id = ? AND work_id = ?",
+        (status, timestamp, g.user["id"], work_id),
+    )
+    if cursor.rowcount == 0:
+        db.execute(
+            "INSERT OR IGNORE INTO bookshelf (user_id, work_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (g.user["id"], work_id, status, timestamp, timestamp),
+        )
+    audit("更新书架", "work", str(work_id), f"{work['title']} · {status}", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/shelf/<int:work_id>/remove")
+@require_auth
+def remove_shelf(work_id: int):
+    db = get_db()
+    db.execute("DELETE FROM bookshelf WHERE user_id = ? AND work_id = ?", (g.user["id"], work_id))
+    audit("移出书架", "work", str(work_id), "", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/works/<int:work_id>/follow")
+@require_auth
+def toggle_work_follow(work_id: int):
+    work = public_work(work_id)
+    if not work:
+        return json_error("作品不存在或尚未公开", 404)
+    db = get_db()
+    existing = db.execute(
+        "SELECT 1 FROM work_follows WHERE user_id = ? AND work_id = ?", (g.user["id"], work_id)
+    ).fetchone()
+    if existing:
+        db.execute("DELETE FROM work_follows WHERE user_id = ? AND work_id = ?", (g.user["id"], work_id))
+        audit("取消追更", "work", str(work_id), f"取消追更《{work['title']}》", g.user["id"])
+    else:
+        db.execute(
+            "INSERT OR IGNORE INTO work_follows (user_id, work_id, created_at) VALUES (?, ?, ?)",
+            (g.user["id"], work_id, now_ms()),
+        )
+        audit("追更作品", "work", str(work_id), f"追更《{work['title']}》", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/chapters/<int:chapter_id>/progress")
+@require_auth
+def record_reading_progress(chapter_id: int):
+    chapter = get_db().execute("SELECT * FROM chapters WHERE id = ?", (chapter_id,)).fetchone()
+    if not chapter or chapter["status"] != "PUBLISHED":
+        return json_error("章节不存在或尚未公开", 404)
+    if not public_work(int(chapter["work_id"])):
+        return json_error("作品不存在或尚未公开", 404)
+    db = get_db()
+    timestamp = now_ms()
+    cursor = db.execute(
+        "UPDATE reading_progress SET last_chapter_id = ?, last_read_at = ? WHERE user_id = ? AND work_id = ?",
+        (chapter_id, timestamp, g.user["id"], chapter["work_id"]),
+    )
+    if cursor.rowcount == 0:
+        db.execute(
+            "INSERT OR IGNORE INTO reading_progress (user_id, work_id, last_chapter_id, last_read_at) VALUES (?, ?, ?, ?)",
+            (g.user["id"], chapter["work_id"], chapter_id, timestamp),
+        )
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/chapters/<int:chapter_id>/comments")
+@require_auth
+def create_chapter_comment(chapter_id: int):
+    chapter = get_db().execute("SELECT * FROM chapters WHERE id = ?", (chapter_id,)).fetchone()
+    if not chapter or chapter["status"] != "PUBLISHED":
+        return json_error("章节不存在或尚未公开", 404)
+    work = public_work(int(chapter["work_id"]))
+    if not work:
+        return json_error("作品不存在或尚未公开", 404)
+    if not bool(row_value(work, "allow_comments", 1)):
+        return json_error("作者已关闭评论", 403)
+    payload = request_json()
+    text = clean_text(payload.get("text"), 500, required=True)
+    db = get_db()
+    parent = None
+    parent_id = parse_numeric_id(payload.get("parentId")) if payload.get("parentId") else None
+    if parent_id:
+        parent = db.execute(
+            "SELECT * FROM chapter_comments WHERE id = ? AND chapter_id = ? AND deleted_at IS NULL",
+            (parent_id, chapter_id),
+        ).fetchone()
+        if not parent:
+            return json_error("要回复的章评不存在", 404)
+    effective, reason = evaluate_comment_risk(db, g.user, work, text, chapter_id=int(chapter_id))
+    cursor = db.execute(
+        "INSERT INTO chapter_comments (chapter_id, user_id, parent_id, text, created_at, effective) VALUES (?, ?, ?, ?, ?, ?)",
+        (chapter_id, g.user["id"], parent_id, text, now_ms(), int(effective)),
+    )
+    comment_id = cursor.lastrowid
+    if not effective:
+        record_risk(db, g.user["id"], "comment_pattern", reason, level="MEDIUM", target_type="chapter_comment", target_id=str(comment_id))
+    link = f"#/chapter/ch{chapter_id}"
+    if work["author_id"] != g.user["id"]:
+        notify(work["author_id"], f"{g.user['display_name']} 评论了《{work['title']}》第 {chapter['chapter_number']} 章", "comment", link)
+    if parent and int(parent["user_id"]) != int(g.user["id"]):
+        notify(parent["user_id"], f"{g.user['display_name']} 回复了你的章评", "comment", link)
+    audit("发表章评", "chapter_comment", str(comment_id), f"评论《{work['title']}》第 {chapter['chapter_number']} 章", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/chapter-comments/<int:comment_id>/delete")
+@require_auth
+def delete_chapter_comment(comment_id: int):
+    comment = get_db().execute("SELECT * FROM chapter_comments WHERE id = ?", (comment_id,)).fetchone()
+    if not comment:
+        return json_error("章评不存在", 404)
+    is_owner = int(comment["user_id"]) == int(g.user["id"])
+    if not is_owner and not (g.user["role"] == "admin" and admin_level(g.user)):
+        return json_error("只能删除自己的章评", 403)
+    get_db().execute(
+        "UPDATE chapter_comments SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+        (now_ms(), comment_id),
+    )
+    audit("删除章评", "chapter_comment", str(comment_id), "删除章评", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/chapter-comments/<int:comment_id>/like")
+@require_auth
+def toggle_chapter_comment_like(comment_id: int):
+    comment = get_db().execute(
+        "SELECT * FROM chapter_comments WHERE id = ? AND deleted_at IS NULL", (comment_id,)
+    ).fetchone()
+    if not comment:
+        return json_error("章评不存在", 404)
+    chapter = get_db().execute("SELECT * FROM chapters WHERE id = ?", (comment["chapter_id"],)).fetchone()
+    if not chapter or chapter["status"] != "PUBLISHED" or not public_work(int(chapter["work_id"])):
+        return json_error("章评不存在或不可访问", 404)
+    db = get_db()
+    existing = db.execute(
+        "SELECT 1 FROM chapter_comment_likes WHERE comment_id = ? AND user_id = ?",
+        (comment_id, g.user["id"]),
+    ).fetchone()
+    if existing:
+        db.execute("DELETE FROM chapter_comment_likes WHERE comment_id = ? AND user_id = ?", (comment_id, g.user["id"]))
+    else:
+        db.execute(
+            "INSERT INTO chapter_comment_likes (comment_id, user_id, created_at) VALUES (?, ?, ?)",
+            (comment_id, g.user["id"], now_ms()),
+        )
+    db.commit()
+    return json_ok(bootstrap_payload())
 
 
 @app.get("/api/works/<int:work_id>/versions")
@@ -3178,6 +3841,46 @@ def review_work(work_id: int):
     notify(work["author_id"], f"作品《{work['title']}》{label}。" + (f" 审核意见：{note}" if note else ""), "work", f"#/work/w{work_id}")
     audit(label, "work", str(work_id), f"{label}《{work['title']}》", g.user["id"])
     get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/chapters/<int:chapter_id>/review")
+@require_admin
+def review_chapter(chapter_id: int):
+    payload = request_json()
+    action = clean_text(payload.get("action"), 20, required=True)
+    note = clean_text(payload.get("note"), 300)
+    if action not in {"publish", "reject"}:
+        return json_error("章节审核操作无效", 400)
+    db = get_db()
+    chapter = db.execute("SELECT * FROM chapters WHERE id = ?", (chapter_id,)).fetchone()
+    if not chapter:
+        return json_error("章节不存在", 404)
+    if chapter["status"] != "PENDING_REVIEW":
+        return json_error("当前章节不在人工复核状态", 409)
+    work = db.execute("SELECT * FROM works WHERE id = ?", (chapter["work_id"],)).fetchone()
+    if not work:
+        return json_error("所属作品不存在", 404)
+    reviewed_at = now_ms()
+    status = "PUBLISHED" if action == "publish" else "REJECTED"
+    published_at = reviewed_at if action == "publish" else None
+    db.execute(
+        "UPDATE chapters SET status = ?, review_note = ?, published_at = ?, updated_at = ? WHERE id = ?",
+        (status, note, published_at, reviewed_at, chapter_id),
+    )
+    if status == "PUBLISHED":
+        db.execute("UPDATE works SET updated_at = ? WHERE id = ?", (reviewed_at, work["id"]))
+        notify_work_followers(db, work, chapter)
+    label = "已通过审核" if action == "publish" else "已退回修改"
+    notify(
+        work["author_id"],
+        f"连载《{work['title']}》第 {chapter['chapter_number']} 章《{chapter['title']}》{label}。"
+        + (f" 审核意见：{note}" if note else ""),
+        "chapter",
+        f"#/serial/w{work['id']}",
+    )
+    audit("审核章节", "chapter", str(chapter_id), f"{label}《{chapter['title']}》", g.user["id"])
+    db.commit()
     return json_ok(bootstrap_payload())
 
 
