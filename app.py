@@ -2290,19 +2290,30 @@ def build_state(user) -> dict:
                 """
             ).fetchall()
         ]
-        reports = [
-            {
+        report_rows = db.execute(
+            "SELECT r.*, u.display_name AS reporter_name FROM reports r LEFT JOIN users u ON u.id = r.reporter_id ORDER BY r.created_at DESC LIMIT 200"
+        ).fetchall()
+        reports = []
+        for row in report_rows:
+            risk = assess_report_risk(db, row)
+            reports.append({
                 "id": f"r{row['id']}",
                 "type": row["type"],
+                "targetId": row["target_id"],
                 "target": row["target_label"],
                 "reason": row["reason"],
                 "detail": row["detail"],
                 "message": row["message_excerpt"],
+                "suspectedUrl": row_value(row, "suspected_original_url", "") or "",
+                "handledAction": row_value(row, "handled_action", "") or "",
+                "reporter": row["reporter_name"] or "匿名用户",
                 "at": iso_time(row["created_at"]),
+                "handledAt": iso_time(row["handled_at"]) if row_value(row, "handled_at") else "",
                 "status": row["status"],
-            }
-            for row in db.execute("SELECT * FROM reports ORDER BY created_at DESC LIMIT 200").fetchall()
-        ]
+                "risk": risk["level"],
+                "riskScore": risk["score"],
+                "riskReasons": risk["reasons"],
+            })
         audit_logs = [
             {
                 "id": f"l{row['id']}",
@@ -3457,9 +3468,45 @@ def save_message_settings():
     return json_ok(bootstrap_payload())
 
 
-@app.post("/api/reports")
-@require_auth
-def create_report():
+REPORT_TYPES = {"作品", "章节", "作品评论", "章评", "书友分享", "用户", "私信", "私信消息", "版权举报", "版权 / 疑似抄袭", "评论举报"}
+
+
+def assess_report_risk(db, row) -> dict:
+    """基于真实库内信号给出风险分级，仅辅助人工处理，不自动处罚。"""
+    score = 0
+    reasons = []
+    reason = str(row["reason"] or "")
+    rtype = str(row["type"] or "")
+    if "版权" in reason or "抄袭" in reason:
+        score += 2
+        reasons.append("版权或抄袭类举报")
+    if rtype in {"作品", "章节"}:
+        score += 1
+        reasons.append("公开内容举报")
+    target_id = parse_numeric_id(row["target_id"])
+    if target_id and rtype in {"作品", "版权举报", "版权 / 疑似抄袭"}:
+        similar = db.execute("SELECT COUNT(*) AS total FROM plagiarism_flags WHERE work_id = ?", (target_id,)).fetchone()
+        if similar and int(similar["total"]) > 0:
+            score += 4
+            reasons.append("该作品已有疑似相似记录")
+    duplicates = db.execute(
+        "SELECT COUNT(*) AS total FROM reports WHERE target_id = ? AND type = ? AND status IN ('待处理', '处理中')",
+        (row["target_id"], rtype),
+    ).fetchone()
+    if duplicates and int(duplicates["total"]) > 1:
+        score += 2
+        reasons.append("同一对象存在多条未处理举报")
+    reporter = user_row(row["reporter_id"])
+    if reporter and _account_age_ms(reporter) < 24 * 3600 * 1000:
+        reasons.append("举报账号注册不足一天，已记录来源")
+    if row["message_excerpt"]:
+        reasons.append("举报包含被举报私信片段")
+    risk = "高" if score >= 5 else "中" if score >= 3 else "低"
+    if not reasons:
+        reasons.append("暂未发现额外风险信号")
+    return {"level": risk, "score": score, "reasons": reasons}
+
+
     payload = request_json()
     report_type = clean_text(payload.get("type"), 20, required=True)
     target_id = clean_text(payload.get("targetId"), 80)
@@ -3468,7 +3515,18 @@ def create_report():
     detail = clean_text(payload.get("detail"), 500)
     message_excerpt = clean_text(payload.get("message"), 500)
     suspected_url = clean_text(payload.get("suspectedOriginalUrl"), 300)
-    cursor = get_db().execute(
+    if report_type not in REPORT_TYPES:
+        return json_error("举报类型无效", 400)
+    if not target_id:
+        return json_error("请选择要举报的对象", 400)
+    db = get_db()
+    existing = db.execute(
+        "SELECT 1 FROM reports WHERE reporter_id = ? AND type = ? AND target_id = ? AND status IN ('待处理', '处理中') LIMIT 1",
+        (g.user["id"], report_type, target_id),
+    ).fetchone()
+    if existing:
+        return json_error("你已经举报过该对象，编辑部正在处理", 409)
+    cursor = db.execute(
         "INSERT INTO reports (reporter_id, type, target_id, target_label, reason, detail, message_excerpt, suspected_original_url, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?)",
         (g.user["id"], report_type, target_id, target_label, reason, detail, message_excerpt, suspected_url, now_ms()),
     )
@@ -3957,11 +4015,16 @@ def update_report_status(report_id: int):
     row = get_db().execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
     if not row:
         return json_error("举报记录不存在", 404)
+    if status in {"已处理", "已驳回"}:
+        conclusion = f"你的举报已由编辑部{status}"
+        if action:
+            conclusion += f"（{action}）"
+        notify(row["reporter_id"], f"{conclusion}：{row['target_label']}", "report", "#/notifications")
     get_db().execute(
         "UPDATE reports SET status = ?, handled_action = ?, handled_at = ?, handled_by = ? WHERE id = ?",
         (status, action, now_ms(), g.user["id"], report_id),
     )
-    if action in {"暂时隐藏", "确认侵权并下架"} and row["type"] in {"作品", "版权举报"}:
+    if action in {"暂时隐藏", "确认侵权并下架"} and row["type"] in {"作品", "版权举报", "版权 / 疑似抄袭"}:
         target_work = parse_numeric_id(row["target_id"])
         if target_work:
             get_db().execute("UPDATE works SET status = 'hidden', updated_at = ? WHERE id = ?", (now_ms(), target_work))
@@ -3969,6 +4032,14 @@ def update_report_status(report_id: int):
         target_share = parse_numeric_id(row["target_id"])
         if target_share:
             get_db().execute("UPDATE book_shares SET status = 'hidden', updated_at = ? WHERE id = ?", (now_ms(), target_share))
+    elif action == "暂时隐藏" and row["type"] in {"作品评论", "评论举报"}:
+        target_comment = parse_numeric_id(row["target_id"])
+        if target_comment:
+            get_db().execute("UPDATE comments SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", (now_ms(), target_comment))
+    elif action == "暂时隐藏" and row["type"] == "章评":
+        target_chapter_comment = parse_numeric_id(row["target_id"])
+        if target_chapter_comment:
+            get_db().execute("UPDATE chapter_comments SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", (now_ms(), target_chapter_comment))
     audit("处理举报", "report", str(report_id), f"举报状态更新为{status}" + (f"，动作：{action}" if action else ""), g.user["id"])
     get_db().commit()
     return json_ok(bootstrap_payload())

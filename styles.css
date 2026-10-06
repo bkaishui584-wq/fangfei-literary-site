@@ -1004,3 +1004,10 @@ html, body { overflow-x: hidden; }
 .work-filters { margin-top: -6px; margin-bottom: 14px; }
 .work-filters .select { min-width: 140px; }
 .work-result-count { margin: 0 0 14px; }
+
+.risk-badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; }
+.report-risk-high { background:#f6dede; color:#a83232; }
+.report-risk-mid { background:#f7ecd7; color:#9a6a1e; }
+.report-risk-low { background:#e3efe3; color:#3d7a3d; }
+.report-summary { margin-bottom:14px; padding:12px 14px; border:1px solid var(--line); border-radius:14px; background:var(--control-glass); }
+.report-summary strong, .report-summary small { display:block; }
