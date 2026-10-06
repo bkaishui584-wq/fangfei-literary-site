@@ -1097,6 +1097,26 @@ def notify_work_followers(db, work, chapter) -> None:
         notify_once(follower["user_id"], text, "chapter_update", link, work["id"], chapter["id"])
 
 
+def notify_author_followers(db, work_id: int) -> None:
+    """Notify an author's followers when a new work is published."""
+    work = db.execute(
+        "SELECT w.*, u.display_name AS author_name FROM works w JOIN users u ON u.id = w.author_id WHERE w.id = ?",
+        (work_id,),
+    ).fetchone()
+    if not work or work["status"] != "published" or not bool(row_value(work, "is_public", 1)):
+        return
+    if (row_value(work, "visibility", "PUBLIC") or "PUBLIC") != "PUBLIC":
+        return
+    link = f"#/work/w{work_id}"
+    text = f"{work['author_name']} 发布了新作品《{work['title']}》"
+    followers = db.execute(
+        "SELECT follower_id FROM follows WHERE author_id = ?",
+        (work["author_id"],),
+    ).fetchall()
+    for follower in followers:
+        notify_once(follower["follower_id"], text, "author_new_work", link, work_id)
+
+
 def ensure_message_settings(user_id: int) -> None:
     get_db().execute(
         "INSERT OR IGNORE INTO message_settings (user_id, allow_strangers, recall_minutes, notifications) VALUES (?, 1, 2, 1)",
@@ -1500,6 +1520,7 @@ def run_agent_review(work_id: int, author_id: int, title: str, body, category: s
                 "UPDATE works SET status = 'published', review_note = '', published_at = ?, updated_at = ? WHERE id = ?",
                 (created_at, created_at, work_id),
             )
+            notify_author_followers(db, work_id)
         db.commit()
         audit("Agent 审核", "work", str(work_id), f"Agent {result['risk_level']}，{result['recommendation']}", None)
         db.commit()
@@ -2121,6 +2142,9 @@ def build_state(user) -> dict:
     monthly_picks = [row["workId"] for row in monthly_awards]
 
     followed = []
+    followers = []
+    follower_users = []
+    following_users = []
     followed_works = []
     blocked = []
     blocked_users = []
@@ -2153,6 +2177,23 @@ def build_state(user) -> dict:
         ).fetchall()
         blocked = [f"u{row['id']}" for row in blocked_rows]
         blocked_users = [public_user(row) for row in blocked_rows]
+        follower_rows = db.execute(
+            """
+            SELECT u.* FROM follows f JOIN users u ON u.id = f.follower_id
+            WHERE f.author_id = ? ORDER BY f.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        followers = [f"u{row['id']}" for row in follower_rows]
+        follower_users = [public_user(row) for row in follower_rows]
+        following_rows = db.execute(
+            """
+            SELECT u.* FROM follows f JOIN users u ON u.id = f.author_id
+            WHERE f.follower_id = ? ORDER BY f.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        following_users = [public_user(row) for row in following_rows]
         liked = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM likes WHERE user_id = ?", (user_id,)).fetchall()]
         favorited = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM favorites WHERE user_id = ?", (user_id,)).fetchall()]
         bookshelf = [
@@ -2459,6 +2500,9 @@ def build_state(user) -> dict:
         "schemaVersion": 13,
         "currentUser": current_user,
         "followed": followed,
+        "followers": followers,
+        "followerUsers": follower_users,
+        "followingUsers": following_users,
         "followedWorks": followed_works,
         "blocked": blocked,
         "blockedUsers": blocked_users,
@@ -3923,6 +3967,8 @@ def review_work(work_id: int):
         (reviewed_at, g.user["id"], work_id),
     )
     label = {"publish": "通过审核", "reject": "退回修改", "hide": "下架作品"}[action]
+    if action == "publish":
+        notify_author_followers(get_db(), work_id)
     notify(work["author_id"], f"作品《{work['title']}》{label}。" + (f" 审核意见：{note}" if note else ""), "work", f"#/work/w{work_id}")
     audit(label, "work", str(work_id), f"{label}《{work['title']}》", g.user["id"])
     get_db().commit()

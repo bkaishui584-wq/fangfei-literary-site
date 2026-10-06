@@ -38,6 +38,9 @@
     schemaVersion: DATA_VERSION,
     currentUser: { id: "", name: "访客", role: "guest" },
     followed: [],
+    followers: [],
+    followerUsers: [],
+    followingUsers: [],
     followedWorks: [],
     blocked: [],
     blockedUsers: [],
@@ -474,7 +477,7 @@
     const favorited = state.favoritedWorks.map(workById).filter(Boolean);
     const comments = state.works.flatMap((work) => (work.comments || []).map((comment) => ({ ...comment, workTitle: work.title }))).filter((comment) => comment.userId === currentUserId());
     const author = state.authors.find((item) => item.id === currentUserId());
-    const tabs = [["workbench", "作者工作台"], ["works", "我的作品"], ["shelf", "我的书架"], ["favorites", "我的收藏"], ["likes", "我的点赞"], ["comments", "我的评论"], ["awards", "我的获奖"], ["activities", "我的活动"], ["shares", "我的分享"], ["settings", "账户设置"]];
+    const tabs = [["workbench", "作者工作台"], ["works", "我的作品"], ["shelf", "我的书架"], ["favorites", "我的收藏"], ["likes", "我的点赞"], ["comments", "我的评论"], ["awards", "我的获奖"], ["activities", "我的活动"], ["shares", "我的分享"], ["network", "关注与粉丝"], ["settings", "账户设置"]];
     let content = "";
     if (profileTab === "workbench") content = renderWorkbench(works, awards, author);
     if (profileTab === "works") {
@@ -498,6 +501,12 @@
     if (profileTab === "awards") content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">文学社荣誉</p><h2 class="section-title">我的获奖</h2></div></div>${awards.length ? `<ul class="admin-list">${awards.map((award) => `<li class="admin-row"><span><strong>${escapeHtml(workById(award.workId)?.title || "作品")}</strong><small class="admin-note">${escapeHtml(award.month)} · ${escapeHtml(award.category || "综合")} · 由 ${escapeHtml(award.selectedByName || "编辑部")} 评选</small></span><button class="button button-small" type="button" data-work="${award.workId}">阅读</button></li>`).join("")}</ul>` : '<div class="empty compact-empty">暂无获奖记录。</div>'}</section>`;
     if (profileTab === "activities") content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">参与记录</p><h2 class="section-title">我的活动</h2></div></div><div class="empty compact-empty">当前系统暂未保存活动报名关系，暂无可展示记录。</div></section>`;
     if (profileTab === "shares") { const mine = state.bookShares.filter((item) => item.mine); content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">阅读推荐</p><h2 class="section-title">我的分享</h2></div><button class="button button-small button-primary" type="button" data-book-share-new>发布分享</button></div>${mine.length ? `<div class="book-share-grid">${mine.map(bookShareCard).join("")}</div>` : '<div class="empty compact-empty">暂无书友分享。</div>'}</section>`; }
+    if (profileTab === "network") {
+      const following = Array.isArray(state.followingUsers) ? state.followingUsers : [];
+      const followers = Array.isArray(state.followerUsers) ? state.followerUsers : [];
+      const people = (items, emptyText) => items.length ? `<ul class="admin-list">${items.map((person) => `<li class="admin-row"><span><strong>${escapeHtml(person.name || "匿名用户")}</strong><small class="admin-note">${escapeHtml(person.bio || "还没有写下个人简介。")}</small></span><div class="admin-actions">${authorById(person.id) ? `<button class="button button-small" type="button" data-author="${person.id}">查看主页</button>` : ""}<button class="button button-small button-primary" type="button" data-message-author="${person.id}">私信</button></div></li>`).join("")}</ul>` : `<div class="empty compact-empty">${emptyText}</div>`;
+      content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">社交关系</p><h2 class="section-title">关注与粉丝</h2></div></div><div class="section-head"><div><h3 class="section-title">我的关注</h3></div><span class="muted">${following.length} 位</span></div>${people(following, "还没有关注作者。")}<div class="section-head"><div><h3 class="section-title">我的粉丝</h3></div><span class="muted">${followers.length} 位</span></div>${people(followers, "还没有粉丝。")}</section>`;
+    }
     if (profileTab === "settings") content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">账号与偏好</p><h2 class="section-title">账户设置</h2></div></div><div class="settings-grid"><button class="setting-card" type="button" data-profile-edit><strong>个人资料</strong><small>笔名、头像、简介、背景图和文学偏好</small></button><button class="setting-card" type="button" data-open-settings><strong>主题设置</strong><small>保留现有六套主题并即时切换</small></button><button class="setting-card" type="button" data-profile-privacy><strong>隐私与私信</strong><small>陌生人私信、拉黑名单和撤回时间</small></button><button class="setting-card" type="button" data-profile-notifications><strong>通知设置</strong><small>控制站内通知与未读提醒</small></button><button class="setting-card" type="button" data-profile-password><strong>安全设置</strong><small>修改登录密码</small></button><button class="setting-card" type="button" data-route="messages"><strong>我的私信</strong><small>查看会话和未读消息</small></button><button class="setting-card is-danger" type="button" data-logout><strong>退出登录</strong><small>结束当前浏览器会话</small></button></div></section>`;
     app.innerHTML = `<div class="page profile-page"><header class="profile-hero" ${user.coverTheme && THEMES[user.coverTheme] ? `style="--profile-cover:url('${THEMES[user.coverTheme].image}')"` : ""}><div class="profile-hero-main">${avatarHtml(user, "avatar profile-avatar")}<div><p class="eyebrow">个人中心</p><h1>${escapeHtml(user.name)}</h1><p>${escapeHtml(user.bio || "还没有写下个人简介。")}</p><small>加入于 ${escapeHtml(user.joinedAt || "未知时间")}</small></div></div><div class="profile-stats"><span><strong>${published.length}</strong>已发布作品</span><span><strong>${awards.length}</strong>获奖</span><span><strong>${favorited.length}</strong>收藏</span><span><strong>${Number(author?.followerCount) || 0}</strong>关注者</span></div></header><nav class="profile-tabs">${tabs.map(([id, label]) => `<button class="${profileTab === id ? "is-active" : ""}" type="button" data-profile-tab="${id}">${label}</button>`).join("")}</nav>${content}</div>`;
   }
@@ -984,7 +993,7 @@
     const followed = state.followed.includes(author.id);
     app.innerHTML = `<div class="page"><button class="link-button" type="button" data-route="authors">← 返回作者列表</button>
       <header class="author-profile"><div class="author-profile-main"><span class="avatar">${escapeHtml(author.name.slice(0, 1))}</span><div><p class="eyebrow">作者主页</p><h1 class="page-title">${escapeHtml(author.name)}</h1>${author.bio ? `<p class="page-note">${escapeHtml(author.bio)}</p>` : ""}</div></div><div class="author-profile-actions"><button class="button" type="button" data-follow="${author.id}">${followed ? "已关注" : "关注作者"}</button><button class="button button-primary" type="button" data-message-author="${author.id}">私信作者</button></div></header>
-      <section class="author-dashboard"><article><strong>${works.length}</strong><span>作品数量</span></article><article><strong>${monthly.length}</strong><span>月度优秀</span></article><article><strong>${likes}</strong><span>获得点赞</span></article><article><strong>${words}</strong><span>总字数</span></article></section>
+      <section class="author-dashboard"><article><strong>${works.length}</strong><span>作品数量</span></article><article><strong>${monthly.length}</strong><span>月度优秀</span></article><article><strong>${likes}</strong><span>获得点赞</span></article><article><strong>${Number(author.followerCount) || 0}</strong><span>关注者</span></article><article><strong>${words}</strong><span>总字数</span></article></section>
       ${author.awardCount ? `<section class="section"><div class="section-head"><h2 class="section-title">获奖记录</h2></div><p>${Number(author.awardCount) || 0} 次获奖。</p></section>` : ""}
       <section class="section"><div class="section-head"><div><p class="eyebrow">作品集</p><h2 class="section-title">公开作品</h2></div></div>${works.length ? `<div class="work-grid">${works.map(workCard).join("")}</div>` : '<div class="empty compact-empty">这位作者还没有公开作品。</div>'}</section>
     </div>`;
@@ -1412,6 +1421,7 @@
     comment: ["互动", "评论"],
     like: ["互动", "点赞"],
     follow: ["社交", "关注"],
+    author_new_work: ["社交", "作者新作"],
     message: ["社交", "私信"],
     chapter_update: ["作品", "新章节"],
     chapter: ["作品", "章节审核"],
@@ -1455,12 +1465,12 @@
     const report = state.reports.find((item) => numericId(item.id) === numericId(reportId));
     if (!report) return showToast("举报记录不存在");
     const status = report.status === "待处理" ? "处理中" : report.status;
-    openModal("处理举报", `<div class="report-summary"><strong>${escapeHtml(report.target)} · ${escapeHtml(report.reason)}</strong><small>${escapeHtml(report.type || "举报")} · 风险 ${escapeHtml(report.risk || "未评估")} · 举报REN ${escapeHtml(report.reporter || "匿名")}</small>${report.riskReasons && report.riskReasons.length ? `<small>${escapeHtml(report.riskReasons.join("；"))}</small>` : ""}</div><div class="field"><label>处置动作</label><select class="select" id="report-action"><option value="">仅更新状态</option><option value="驳回">驳回</option><option value="要求补充材料">要求补充材料</option><option value="暂时隐藏">暂时隐藏BEI举报</option><option value="确认侵权并下架">确认侵权并下架</option></select></div><div class="field"><label>处理状态</label><select class="select" id="report-status"><option value="处理中" ${status === "处理中" ? "selected" : ""}>处理中</option><option value="YI处理" ${report.status === "YI处理" ? "selected" : ""}>YI处理</option><option value="YI驳回" ${report.status === "YI驳回" ? "selected" : ""}>YI驳回</option></select></div><p class="muted">确认侵权并下架或暂时隐藏仅作用于作品或书友分享，处理记录会写入审计日志。</p>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-primary" type="button" id="submit-report-handler">TIJIAO处理</button></div>');
-    document.querySelector("#report-action")?.addEventListener("change", (event) => { if (!event.target.value) return; const statusSelect = document.querySelector("#report-status"); if (statusSelect) statusSelect.value = "YI处理"; });
+    openModal("处理举报", `<div class="report-summary"><strong>${escapeHtml(report.target)} · ${escapeHtml(report.reason)}</strong><small>${escapeHtml(report.type || "举报")} · 风险 ${escapeHtml(report.risk || "未评估")} · 举报人 ${escapeHtml(report.reporter || "匿名")}</small>${report.riskReasons && report.riskReasons.length ? `<small>${escapeHtml(report.riskReasons.join("；"))}</small>` : ""}</div><div class="field"><label>处置动作</label><select class="select" id="report-action"><option value="">仅更新状态</option><option value="驳回">驳回</option><option value="要求补充材料">要求补充材料</option><option value="暂时隐藏">暂时隐藏被举报</option><option value="确认侵权并下架">确认侵权并下架</option></select></div><div class="field"><label>处理状态</label><select class="select" id="report-status"><option value="处理中" ${status === "处理中" ? "selected" : ""}>处理中</option><option value="已处理" ${report.status === "已处理" ? "selected" : ""}>已处理</option><option value="已驳回" ${report.status === "已驳回" ? "selected" : ""}>已驳回</option></select></div><p class="muted">确认侵权并下架或暂时隐藏仅作用于作品或书友分享，处理记录会写入审计日志。</p>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-primary" type="button" id="submit-report-handler">提交处理</button></div>');
+    document.querySelector("#report-action")?.addEventListener("change", (event) => { if (!event.target.value) return; const statusSelect = document.querySelector("#report-status"); if (statusSelect) statusSelect.value = "已处理"; });
     document.querySelector("#submit-report-handler")?.addEventListener("click", async () => {
       const action = String(document.querySelector("#report-action")?.value || "");
       const nextStatus = String(document.querySelector("#report-status")?.value || "处理中");
-      await performAction(`/api/admin/reports/${numericId(reportId)}/status`, { status: nextStatus, action }, "举报YI处理", () => { closeModal(); renderAdmin(); });
+      await performAction(`/api/admin/reports/${numericId(reportId)}/status`, { status: nextStatus, action }, "举报已处理", () => { closeModal(); renderAdmin(); });
     });
   }
 
