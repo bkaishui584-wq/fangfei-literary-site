@@ -77,6 +77,11 @@
   let route = location.hash.replace(/^#\/?/, "") || "home";
   let workFilter = "全部";
   let searchTerm = "";
+  let workTagFilter = "";
+  let workAuthorFilter = "";
+  let workFormatFilter = "all";
+  let workSerialFilter = "all";
+  let workPeriodFilter = "all";
   let activeConversation = state.conversations[0]?.id || null;
   let replyTo = null;
   let adminTab = "概览";
@@ -104,6 +109,7 @@
   let actionBusy = false;
   let authBusy = false;
   let dialogResolver = null;
+  loadWorkFilters();
   const numericId = (value) => Number(String(value || "").replace(/^[^\d]*/, ""));
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const apiRequest = async (path, options = {}) => {
@@ -293,6 +299,10 @@
   const readingMinutes = (work) => Math.max(1, Math.round((work.body || []).join("").length / 420));
   const wordCount = (work) => (work.body || []).join("").replace(/\s/g, "").length;
   const workTags = (work) => Array.isArray(work.tags) ? work.tags.filter(Boolean) : [];
+  const asTime = (value) => { const n = Number(value); if (Number.isFinite(n) && n > 0) return n; const t = new Date(String(value || "")).getTime(); return Number.isFinite(t) ? t : 0; };
+  const WORK_FILTER_KEY = "fangfei-work-filters-v1";
+  const saveWorkFilters = () => { try { localStorage.setItem(WORK_FILTER_KEY, JSON.stringify({ searchTerm, workFilter, workSort, workTagFilter, workAuthorFilter, workFormatFilter, workSerialFilter, workPeriodFilter })); } catch {} };
+  const loadWorkFilters = () => { try { const saved = JSON.parse(localStorage.getItem(WORK_FILTER_KEY) || "null"); if (!saved) return; searchTerm = String(saved.searchTerm || ""); workFilter = saved.workFilter || "全部"; workSort = saved.workSort || "latest"; workTagFilter = saved.workTagFilter || ""; workAuthorFilter = saved.workAuthorFilter || ""; workFormatFilter = saved.workFormatFilter || "all"; workSerialFilter = saved.workSerialFilter || "all"; workPeriodFilter = saved.workPeriodFilter || "all"; } catch {} };
   const authorKey = (name) => `writer-${Array.from(String(name || "作者")).map((char) => char.codePointAt(0).toString(36)).join("")}`;
   const formatDate = (value) => {
     const date = new Date(value);
@@ -838,27 +848,57 @@
     </div>`;
   }
 
+  function clearWorkFilters() {
+    searchTerm = ""; workFilter = "全部"; workTagFilter = ""; workAuthorFilter = ""; workFormatFilter = "all"; workSerialFilter = "all"; workPeriodFilter = "all";
+    saveWorkFilters();
+    renderWorks();
+  }
+
   function renderWorks() {
     const term = searchTerm.trim().toLowerCase();
+    const allTags = Array.from(new Set(publicWorks().flatMap(workTags))).sort((a, b) => a.localeCompare(b));
+    const authorNames = Array.from(new Set(publicWorks().map((work) => work.author).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    const now = Date.now();
+    const periodCut = { month: now - 30 * 86400000, quarter: now - 92 * 86400000, year: now - 366 * 86400000 };
     const works = publicWorks().filter((work) => {
       const tags = workTags(work).join(" ");
-      const text = `${work.title}${work.author}${work.excerpt}${tags}${(work.body || []).join("")}`.toLowerCase();
-      return (workFilter === "全部" || work.category === workFilter) && (!term || text.includes(term));
+      const text = `${work.title}${work.author}${work.excerpt}${work.category}${tags}${(work.body || []).join("")}`.toLowerCase();
+      if (term && !text.includes(term)) return false;
+      if (workFilter !== "全部" && work.category !== workFilter) return false;
+      if (workTagFilter && !workTags(work).some((tag) => tag.toLowerCase() === workTagFilter.toLowerCase())) return false;
+      if (workAuthorFilter && work.author !== workAuthorFilter) return false;
+      if (workFormatFilter !== "all" && (work.workFormat || "single") !== workFormatFilter) return false;
+      if (workSerialFilter !== "all") {
+        if (workSerialFilter === "single") { if (isSerialWork(work)) return false; }
+        else if (!isSerialWork(work) || (work.serialStatus || "ONGOING") !== workSerialFilter) return false;
+      }
+      if (periodCut[workPeriodFilter] && asTime(work.publishedAt || work.createdAt) < periodCut[workPeriodFilter]) return false;
+      return true;
     }).sort((a, b) => {
       if (workSort === "popular") return Number(b.views || 0) - Number(a.views || 0);
+      if (workSort === "likes") return Number(b.likes || 0) - Number(a.likes || 0);
       if (workSort === "favorites") return Number(b.favorites || 0) - Number(a.favorites || 0);
       if (workSort === "comments") return Number(b.commentsCount || 0) - Number(a.commentsCount || 0);
-      return Number(b.createdAt || b.publishedAt || 0) - Number(a.createdAt || a.publishedAt || 0);
+      if (workSort === "updated") return asTime(b.updatedAt) - asTime(a.updatedAt);
+      return asTime(b.publishedAt || b.createdAt) - asTime(a.publishedAt || a.createdAt);
     });
+    const hasFilter = term || workFilter !== "全部" || workTagFilter || workAuthorFilter || workFormatFilter !== "all" || workSerialFilter !== "all" || workPeriodFilter !== "all";
     app.innerHTML = `<div class="page">
       <header class="page-head"><div><p class="eyebrow">作品阅览室</p><h1 class="page-title">作品</h1></div><p class="page-note">按体裁浏览，或搜索标题、作者、标签和正文摘录。</p></header>
-      <div class="toolbar"><label class="search-box"><span aria-hidden="true">⌕</span><input id="work-search" type="search" placeholder="搜索作品" value="${escapeHtml(searchTerm)}"></label><select class="select work-sort" id="work-sort" aria-label="作品排序"><option value="latest" ${workSort === "latest" ? "selected" : ""}>最新发布</option><option value="popular" ${workSort === "popular" ? "selected" : ""}>最多阅读</option><option value="favorites" ${workSort === "favorites" ? "selected" : ""}>最多收藏</option><option value="comments" ${workSort === "comments" ? "selected" : ""}>最多评论</option></select>${categories.map((category) => `<button class="filter-chip ${workFilter === category ? "is-active" : ""}" type="button" data-filter="${category}">${category}</button>`).join("")}</div>
-      ${works.length ? `<div class="work-grid">${works.map(workCard).join("")}</div>` : `<div class="empty">没有找到匹配的作品，换个关键词试试。</div>`}
+      <div class="toolbar"><label class="search-box"><span aria-hidden="true">⌕</span><input id="work-search" type="search" placeholder="搜索作品" value="${escapeHtml(searchTerm)}"></label><select class="select work-sort" id="work-sort" aria-label="作品排序"><option value="latest" ${workSort === "latest" ? "selected" : ""}>最新发布</option><option value="updated" ${workSort === "updated" ? "selected" : ""}>最近更新</option><option value="popular" ${workSort === "popular" ? "selected" : ""}>最多阅读</option><option value="likes" ${workSort === "likes" ? "selected" : ""}>最多点赞</option><option value="favorites" ${workSort === "favorites" ? "selected" : ""}>最多收藏</option><option value="comments" ${workSort === "comments" ? "selected" : ""}>最多评论</option></select>${categories.map((category) => `<button class="filter-chip ${workFilter === category ? "is-active" : ""}" type="button" data-filter="${category}">${category}</button>`).join("")}</div>
+      <div class="toolbar work-filters"><select class="select" id="work-tag" aria-label="按标签筛选"><option value="">全部标签</option>${allTags.map((tag) => `<option value="${escapeHtml(tag)}" ${workTagFilter === tag ? "selected" : ""}>${escapeHtml(tag)}</option>`).join("")}</select><select class="select" id="work-author" aria-label="按作者筛选"><option value="">全部作者</option>${authorNames.map((name) => `<option value="${escapeHtml(name)}" ${workAuthorFilter === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select><select class="select" id="work-format" aria-label="按作品形式筛选"><option value="all" ${workFormatFilter === "all" ? "selected" : ""}>全部形式</option><option value="single" ${workFormatFilter === "single" ? "selected" : ""}>单篇</option><option value="serial" ${workFormatFilter === "serial" ? "selected" : ""}>连载</option></select><select class="select" id="work-serial" aria-label="按连载状态筛选"><option value="all" ${workSerialFilter === "all" ? "selected" : ""}>全部状态</option><option value="ONGOING" ${workSerialFilter === "ONGOING" ? "selected" : ""}>连载中</option><option value="COMPLETED" ${workSerialFilter === "COMPLETED" ? "selected" : ""}>已完结</option><option value="HIATUS" ${workSerialFilter === "HIATUS" ? "selected" : ""}>暂停更新</option><option value="single" ${workSerialFilter === "single" ? "selected" : ""}>仅单篇</option></select><select class="select" id="work-period" aria-label="按发布时间筛选"><option value="all" ${workPeriodFilter === "all" ? "selected" : ""}>全部时间</option><option value="month" ${workPeriodFilter === "month" ? "selected" : ""}>近一月</option><option value="quarter" ${workPeriodFilter === "quarter" ? "selected" : ""}>近三月</option><option value="year" ${workPeriodFilter === "year" ? "selected" : ""}>近一年</option></select>${hasFilter ? '<button class="button button-small button-quiet" type="button" data-clear-work-filters>清除筛选</button>' : ""}</div>
+      <p class="muted work-result-count">共 ${works.length} 篇作品</p>
+      ${works.length ? `<div class="work-grid">${works.map(workCard).join("")}</div>` : `<div class="empty">没有找到匹配的作品，换个关键词或清除部分筛选试试。</div>`}
     </div>`;
     const search = document.querySelector("#work-search");
-    search?.addEventListener("input", (event) => { searchTerm = event.target.value; renderWorks(); document.querySelector("#work-search")?.focus(); });
-    document.querySelector("#work-sort")?.addEventListener("change", (event) => { workSort = event.target.value; renderWorks(); });
+    search?.addEventListener("input", (event) => { searchTerm = event.target.value; saveWorkFilters(); renderWorks(); document.querySelector("#work-search")?.focus(); });
+    document.querySelector("#work-sort")?.addEventListener("change", (event) => { workSort = event.target.value; saveWorkFilters(); renderWorks(); });
+    [["#work-tag", "workTagFilter"], ["#work-author", "workAuthorFilter"], ["#work-format", "workFormatFilter"], ["#work-serial", "workSerialFilter"], ["#work-period", "workPeriodFilter"]].forEach(([selector, key]) => {
+      document.querySelector(selector)?.addEventListener("change", (event) => { const setters = { workTagFilter: (v) => workTagFilter = v, workAuthorFilter: (v) => workAuthorFilter = v, workFormatFilter: (v) => workFormatFilter = v, workSerialFilter: (v) => workSerialFilter = v, workPeriodFilter: (v) => workPeriodFilter = v }; setters[key](event.target.value); saveWorkFilters(); renderWorks(); });
+    });
+    document.querySelector("[data-clear-work-filters]")?.addEventListener("click", () => { clearWorkFilters(); });
   }
+
 
   function renderWork(id) {
     const work = workById(id);
@@ -1903,6 +1943,8 @@
     if (target.matches("[data-book-share-delete]")) return deleteBookShare(target.dataset.bookShareDelete);
     if (target.matches("[data-book-share-praise]")) return performAction(`/api/book-shares/${numericId(target.dataset.bookSharePraise)}/praise`, {}, "", () => renderBookShares());
     if (target.matches("[data-book-share-report]")) return reportBookShareDialog(target.dataset.bookShareReport);
+    if (target.matches("[data-clear-work-filters]")) return clearWorkFilters();
+    if (target.matches("[data-filter]")) { workFilter = target.dataset.filter; saveWorkFilters(); return renderWorks(); }
     if (target.matches("[data-route]")) return setRoute(target.dataset.route);
     if (target.matches("[data-like-work]")) return toggleWorkLike(target.dataset.likeWork);
     if (target.matches("[data-favorite-work]")) return toggleWorkFavorite(target.dataset.favoriteWork);

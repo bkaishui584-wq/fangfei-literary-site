@@ -1001,3 +1001,6 @@ html, body { overflow-x: hidden; }
 .workbench-summary { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .notification-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
 .notification-page .admin-list { margin-top: 0; }
+.work-filters { margin-top: -6px; margin-bottom: 14px; }
+.work-filters .select { min-width: 140px; }
+.work-result-count { margin: 0 0 14px; }
