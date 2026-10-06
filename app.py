@@ -1888,7 +1888,8 @@ def build_state(user) -> dict:
         (SELECT COUNT(*) FROM likes l WHERE l.work_id = w.id AND l.effective = 1) AS effective_likes_count,
         (SELECT COUNT(*) FROM favorites f WHERE f.work_id = w.id) AS favorites_count,
         (SELECT COUNT(*) FROM comments c WHERE c.work_id = w.id AND c.deleted_at IS NULL) AS comments_count,
-        (SELECT COUNT(*) FROM comments c WHERE c.work_id = w.id AND c.deleted_at IS NULL AND c.effective = 1) AS effective_comments_count
+        (SELECT COUNT(*) FROM comments c WHERE c.work_id = w.id AND c.deleted_at IS NULL AND c.effective = 1) AS effective_comments_count,
+        (SELECT COUNT(*) FROM work_follows wf WHERE wf.work_id = w.id) AS follow_count
       FROM works w JOIN users u ON u.id = w.author_id
     """
     params: list[object] = []
@@ -1991,6 +1992,7 @@ def build_state(user) -> dict:
                 "views": row["views"],
                 "favorites": row["favorites_count"],
                 "commentsCount": row["comments_count"],
+                "followCount": row_value(row, "follow_count", 0) or 0,
                 "excerpt": row["excerpt"],
                 "body": json.loads(row["body_json"] or "[]"),
                 "comments": comments,

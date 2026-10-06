@@ -80,7 +80,8 @@
   let activeConversation = state.conversations[0]?.id || null;
   let replyTo = null;
   let adminTab = "概览";
-  let profileTab = "works";
+  let profileTab = "workbench";
+  let workbenchFilter = "all";
   let chapterReplyTo = "";
   let publishTopicId = "";
   let mobileChatOpen = false;
@@ -462,8 +463,9 @@
     const favorited = state.favoritedWorks.map(workById).filter(Boolean);
     const comments = state.works.flatMap((work) => (work.comments || []).map((comment) => ({ ...comment, workTitle: work.title }))).filter((comment) => comment.userId === currentUserId());
     const author = state.authors.find((item) => item.id === currentUserId());
-    const tabs = [["works", "我的作品"], ["shelf", "我的书架"], ["favorites", "我的收藏"], ["likes", "我的点赞"], ["comments", "我的评论"], ["awards", "我的获奖"], ["activities", "我的活动"], ["shares", "我的分享"], ["settings", "账户设置"]];
+    const tabs = [["workbench", "作者工作台"], ["works", "我的作品"], ["shelf", "我的书架"], ["favorites", "我的收藏"], ["likes", "我的点赞"], ["comments", "我的评论"], ["awards", "我的获奖"], ["activities", "我的活动"], ["shares", "我的分享"], ["settings", "账户设置"]];
     let content = "";
+    if (profileTab === "workbench") content = renderWorkbench(works, awards, author);
     if (profileTab === "works") {
       const statusItems = [["published", "已发布"], ["pending_agent", "Agent 审核中"], ["pending_review", "等待人工复核"], ["draft", "草稿"], ["rejected", "未通过"], ["private", "私密投稿"]];
       const statusCards = statusItems.map(([status, label]) => {
@@ -489,6 +491,43 @@
     app.innerHTML = `<div class="page profile-page"><header class="profile-hero" ${user.coverTheme && THEMES[user.coverTheme] ? `style="--profile-cover:url('${THEMES[user.coverTheme].image}')"` : ""}><div class="profile-hero-main">${avatarHtml(user, "avatar profile-avatar")}<div><p class="eyebrow">个人中心</p><h1>${escapeHtml(user.name)}</h1><p>${escapeHtml(user.bio || "还没有写下个人简介。")}</p><small>加入于 ${escapeHtml(user.joinedAt || "未知时间")}</small></div></div><div class="profile-stats"><span><strong>${published.length}</strong>已发布作品</span><span><strong>${awards.length}</strong>获奖</span><span><strong>${favorited.length}</strong>收藏</span><span><strong>${Number(author?.followerCount) || 0}</strong>关注者</span></div></header><nav class="profile-tabs">${tabs.map(([id, label]) => `<button class="${profileTab === id ? "is-active" : ""}" type="button" data-profile-tab="${id}">${label}</button>`).join("")}</nav>${content}</div>`;
   }
 
+
+  function workbenchWorkList(works) {
+    if (!works.length) return '<div class="empty compact-empty">这个分类下还没有作品。</div>';
+    const editable = new Set(["draft", "rejected", "pending", "pending_agent", "pending_review", "published"]);
+    return `<div class="profile-work-list">${works.map((work) => `<article class="profile-work-row"><div><span class="work-category">${escapeHtml(work.category || "未分类")}${isSerialWork(work) ? " · 连载" : " · 单篇"}</span><h3>${escapeHtml(work.title)}</h3><small>${escapeHtml(work.excerpt || "")}</small><div class="work-timeline"><span>阅读 ${Number(work.views) || 0}</span><span>收藏 ${Number(work.favorites) || 0}</span><span>点赞 ${Number(work.likes) || 0}</span><span>评论 ${Number(work.commentsCount) || 0}</span><span>追更 ${Number(work.followCount) || 0}</span></div><div class="work-timeline"><span>投稿 ${escapeHtml(formatDate(work.createdAt))}</span>${work.updatedAt ? `<span>更新 ${escapeHtml(formatDate(work.updatedAt))}</span>` : ""}${work.reviewNote ? `<span>意见：${escapeHtml(work.reviewNote)}</span>` : ""}</div></div><div class="profile-work-actions"><span class="status-pill">${escapeHtml(statusLabel(work.status))}</span>${work.status === "hidden" ? "" : `<button class="button button-small" type="button" data-work="${work.id}">查看</button>`}${isSerialWork(work) && work.status !== "hidden" ? `<button class="button button-small" type="button" data-manage-chapters="${work.id}">章节管理</button>` : ""}${editable.has(work.status) ? `<button class="button button-small button-primary" type="button" data-edit-work="${work.id}">${work.status === "published" ? "修改后重审" : "编辑"}</button>` : ""}${work.status !== "hidden" ? `<button class="button button-small button-danger" type="button" data-work-delete="${work.id}">${work.status === "published" ? "撤下" : "删除"}</button>` : ""}</div></article>`).join("")}</div>`;
+  }
+
+  function renderWorkbench(works, awards, author) {
+    const normalWorks = works.filter((work) => !isSerialWork(work));
+    const serialWorks = works.filter(isSerialWork);
+    const drafts = works.filter((work) => work.status === "draft");
+    const trash = works.filter((work) => work.status === "hidden");
+    const pending = works.filter((work) => ["pending", "pending_agent", "pending_review"].includes(work.status));
+    const approved = works.filter(isPublishedWork);
+    const rejected = works.filter((work) => work.status === "rejected");
+    const totals = works.reduce((acc, work) => {
+      acc.views += Number(work.views) || 0;
+      acc.favorites += Number(work.favorites) || 0;
+      acc.likes += Number(work.likes) || 0;
+      acc.comments += Number(work.commentsCount) || 0;
+      acc.follows += Number(work.followCount) || 0;
+      return acc;
+    }, { views: 0, favorites: 0, likes: 0, comments: 0, follows: 0 });
+    const chapterToWork = new Map();
+    const chapterComments = state.works.flatMap((work) => (work.chapters || []).flatMap((chapter) => {
+      chapterToWork.set(chapter.id, work.id);
+      return (chapter.comments || []).map((comment) => ({ ...comment, workTitle: work.title, chapterTitle: chapter.title }));
+    }));
+    const myChapterComments = chapterComments.filter((comment) => comment.userId === currentUserId());
+    const ownedWorkIds = new Set(works.map((work) => work.id));
+    const receivedChapterComments = chapterComments.filter((comment) => ownedWorkIds.has(chapterToWork.get(comment.chapterId)));
+    const filters = [["all", "全部作品", works.length], ["serial", "连载作品", serialWorks.length], ["single", "普通作品", normalWorks.length], ["draft", "草稿箱", drafts.length], ["trash", "回收站", trash.length]];
+    const selected = { all: works, serial: serialWorks, single: normalWorks, draft: drafts, trash }[workbenchFilter] || works;
+    const summary = `<div class="profile-status-summary workbench-summary"><span><strong>${works.length}</strong>全部作品</span><span><strong>${pending.length}</strong>审核中</span><span><strong>${approved.length}</strong>已通过</span><span><strong>${rejected.length}</strong>已退回</span><span><strong>${drafts.length}</strong>草稿</span></div>`;
+    const filterRow = `<div class="workbench-filters">${filters.map(([id, label, count]) => `<button class="filter-chip ${workbenchFilter === id ? "is-active" : ""}" type="button" data-workbench-filter="${id}">${label} ${count}</button>`).join("")}</div>`;
+    return `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">创作与互动</p><h2 class="section-title">作者工作台</h2></div><button class="button button-small button-primary" type="button" data-publish>新建投稿</button></div>${summary}<div class="section-head"><div><h3 class="section-title">作品管理</h3></div></div>${filterRow}${workbenchWorkList(selected)}<div class="section-head"><div><h3 class="section-title">投稿管理</h3></div></div><div class="profile-status-summary"><span><strong>${pending.length}</strong>审核中</span><span><strong>${approved.length}</strong>已通过</span><span><strong>${rejected.length}</strong>已退回</span></div><div class="section-head"><div><h3 class="section-title">创作数据</h3></div><span class="muted">全部作品累计</span></div><div class="profile-status-summary"><span><strong>${totals.views}</strong>阅读</span><span><strong>${totals.favorites}</strong>收藏</span><span><strong>${totals.likes}</strong>点赞</span><span><strong>${totals.comments}</strong>作品评论</span><span><strong>${totals.follows}</strong>追更</span></div><div class="section-head"><div><h3 class="section-title">互动</h3></div></div><div class="profile-status-summary"><span><strong>${receivedChapterComments.length}</strong>章节评论</span><span><strong>${myChapterComments.length}</strong>我的章评</span><span><strong>${awards.length}</strong>获奖</span><span><strong>${Number(author?.followerCount) || 0}</strong>关注者</span></div><p class="muted">作品评论与章评明细请到「我的评论」，读者互动会在后续通知中心统一展示。</p></section>`;
+  }
 
   function openProfileEditor() {
     const user = state.currentUser;
@@ -1798,6 +1837,7 @@
     if (target.matches("[data-profile-password]")) return openChangePassword();
     if (target.matches("[data-profile-edit]")) return openProfileEditor();
     if (target.matches("[data-profile-tab]")) { profileTab = target.dataset.profileTab; return renderProfile(); }
+    if (target.matches("[data-workbench-filter]")) { workbenchFilter = target.dataset.workbenchFilter; return renderProfile(); }
     if (target.matches("[data-logout]")) return logoutAccount();
     if (target.matches("[data-open-settings]")) return openSettings();
     if (target.matches("[data-nav-notify]")) return renderNotifications();
