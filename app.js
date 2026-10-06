@@ -112,7 +112,6 @@
   let actionBusy = false;
   let authBusy = false;
   let dialogResolver = null;
-  loadWorkFilters();
   const numericId = (value) => Number(String(value || "").replace(/^[^\d]*/, ""));
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const apiRequest = async (path, options = {}) => {
@@ -306,6 +305,7 @@
   const WORK_FILTER_KEY = "fangfei-work-filters-v1";
   const saveWorkFilters = () => { try { localStorage.setItem(WORK_FILTER_KEY, JSON.stringify({ searchTerm, workFilter, workSort, workTagFilter, workAuthorFilter, workFormatFilter, workSerialFilter, workPeriodFilter })); } catch {} };
   const loadWorkFilters = () => { try { const saved = JSON.parse(localStorage.getItem(WORK_FILTER_KEY) || "null"); if (!saved) return; searchTerm = String(saved.searchTerm || ""); workFilter = saved.workFilter || "全部"; workSort = saved.workSort || "latest"; workTagFilter = saved.workTagFilter || ""; workAuthorFilter = saved.workAuthorFilter || ""; workFormatFilter = saved.workFormatFilter || "all"; workSerialFilter = saved.workSerialFilter || "all"; workPeriodFilter = saved.workPeriodFilter || "all"; } catch {} };
+  loadWorkFilters();
   const authorKey = (name) => `writer-${Array.from(String(name || "作者")).map((char) => char.codePointAt(0).toString(36)).join("")}`;
   const formatDate = (value) => {
     const date = new Date(value);
