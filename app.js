@@ -81,6 +81,7 @@
   let replyTo = null;
   let adminTab = "概览";
   let profileTab = "workbench";
+  let notificationFilter = "all";
   let workbenchFilter = "all";
   let chapterReplyTo = "";
   let publishTopicId = "";
@@ -1367,12 +1368,48 @@
     return `<div class="panel admin-panel"><h2 class="section-title">${escapeHtml(adminTab)}</h2><p class="muted">当前分类没有待处理记录。</p></div>`;
   }
 
-  function renderNotifications() {
-    if (!ensureLoggedIn()) return;
-    const items = state.notifications.filter((item) => item.type !== "announcement_confirm");
-    openModal("通知中心", items.length ? `<ul class="admin-list notification-list">${items.map((item) => `<li class="admin-row ${item.read ? "" : "is-unread"}"><span><strong>${escapeHtml(item.text)}</strong><small class="admin-note">${escapeHtml(item.type || "站内通知")} · ${escapeHtml(item.at || "")}</small></span>${item.link ? `<button class="button button-small" type="button" data-notification-link="${escapeHtml(item.link)}">查看</button>` : ""}</li>`).join("")}</ul>` : "<p>暂无通知。</p>", '<div class="modal-actions"><button class="button" type="button" data-close-modal>关闭</button></div>');
-    performAction("/api/notifications/read", {}, "", () => renderHeader());
+  const NOTIFICATION_KINDS = {
+    comment: ["互动", "评论"],
+    like: ["互动", "点赞"],
+    follow: ["社交", "关注"],
+    message: ["社交", "私信"],
+    chapter_update: ["作品", "新章节"],
+    chapter: ["作品", "章节审核"],
+    work: ["作品", "作品审核"],
+    award: ["作品", "获奖"],
+    activity: ["活动", "文学活动"],
+    report: ["系统", "举报处理"],
+    admin: ["系统", "管理通知"],
+    system: ["系统", "系统通知"],
+    announcement_confirm: ["系统", "公告确认"]
+  };
+
+  function notificationMeta(item) {
+    const [category, label] = NOTIFICATION_KINDS[item.type] || ["系统", item.type || "通知"];
+    return { category, label };
   }
+
+  function renderNotifications() {
+    if (state.currentUser?.role === "guest" || !state.currentUser?.id) return renderMissing("请先登录后查看通知中心");
+    const items = state.notifications.filter((item) => item.type !== "announcement_confirm");
+    const categories = ["全部", "系统", "作品", "互动", "社交"];
+    const counts = {};
+    categories.forEach((category) => {
+      counts[category] = category === "全部" ? items.length : items.filter((item) => notificationMeta(item).category === category).length;
+    });
+    const unread = items.filter((item) => !item.read).length;
+    notificationFilter = categories.includes(notificationFilter) ? notificationFilter : "全部";
+    const visible = notificationFilter === "全部" ? items : items.filter((item) => notificationMeta(item).category === notificationFilter);
+    const tabs = categories.map((category) => `<button class="filter-chip ${notificationFilter === category ? "is-active" : ""}" type="button" data-notification-filter="${category}">${category} ${counts[category]}</button>`).join("");
+    const list = visible.length
+      ? `<ul class="admin-list notification-list">${visible.map((item) => {
+          const meta = notificationMeta(item);
+          return `<li class="admin-row ${item.read ? "" : "is-unread"}"><span><strong>${escapeHtml(item.text)}</strong><small class="admin-note">${escapeHtml(meta.label)} · ${escapeHtml(item.at || "")}</small></span><div class="admin-row-actions">${item.link ? `<button class="button button-small button-primary" type="button" data-notification-link="${escapeHtml(item.link)}" data-notification-id="${escapeHtml(item.id)}">查看</button>` : ""}${item.read ? "" : `<button class="button button-small" type="button" data-notification-read="${escapeHtml(item.id)}">标记已读</button>`}</div></li>`;
+        }).join("")}</ul>`
+      : '<div class="empty compact-empty">这个分类下还没有通知。</div>';
+    app.innerHTML = `<div class="page notification-page"><header class="page-head"><div><p class="eyebrow">站内消息</p><h1 class="page-title">通知中心</h1><p class="page-note">共 ${items.length} 条通知，其中 ${unread} 条未读。</p></div>${unread ? '<button class="button button-small" type="button" data-notification-read-all>全部标记已读</button>' : ""}</header><div class="toolbar notification-toolbar">${tabs}</div>${list}</div>`;
+  }
+
 
   function renderSerialManager(workId) {
     if (!state.currentUser?.id) return renderMissing("请先登录后管理章节");
@@ -1791,6 +1828,7 @@
     if (route.startsWith("author/")) return renderAuthor(route.split("/")[1]);
     if (route === "messages") return renderMessages();
     if (route === "monthly") return renderMonthly();
+    if (route === "notifications") return renderNotifications();
     if (route === "ranking") return renderRanking();
     if (route === "activities") return renderActivities();
     if (route === "topics") return renderTopics();
@@ -1840,7 +1878,7 @@
     if (target.matches("[data-workbench-filter]")) { workbenchFilter = target.dataset.workbenchFilter; return renderProfile(); }
     if (target.matches("[data-logout]")) return logoutAccount();
     if (target.matches("[data-open-settings]")) return openSettings();
-    if (target.matches("[data-nav-notify]")) return renderNotifications();
+    if (target.matches("[data-nav-notify]")) return setRoute("notifications");
     if (target.matches("[data-nav-profile]")) return openProfile();
     if (target.matches("[data-close-modal], #modal-close")) return closeModal();
     if (target.matches("[data-edit-work]")) return openPublish(target.dataset.editWork);
@@ -1856,6 +1894,9 @@
     if (target.matches("[data-rank-author-metric]")) { rankingAuthorMetric = target.dataset.rankAuthorMetric; return renderRanking(); }
     if (target.matches("[data-announcement-history]")) return openAnnouncementHistory();
     if (target.matches("[data-notification-link]")) { const link = String(target.dataset.notificationLink || "").replace(/^#\//, ""); closeModal(); if (link) return setRoute(link); }
+    if (target.matches("[data-notification-filter]")) { notificationFilter = target.dataset.notificationFilter; return renderNotifications(); }
+    if (target.matches("[data-notification-read-all]")) return performAction("/api/notifications/read", {}, "已全部标记为已读", () => renderNotifications());
+    if (target.matches("[data-notification-read]")) return performAction(`/api/notifications/${numericId(target.dataset.notificationRead)}/read`, {}, "已标记为已读", () => renderNotifications());
     if (target.matches("[data-book-share-new]")) return openBookShareEditor();
     if (target.matches("[data-book-share-sort]")) { bookShareSort = target.dataset.bookShareSort; return renderBookShares(); }
     if (target.matches("[data-book-share-edit]")) return openBookShareEditor(target.dataset.bookShareEdit);
@@ -1892,7 +1933,7 @@
   document.querySelector("#site-nav")?.addEventListener("click", (event) => { if (event.target.closest("button")) closeNav(); });
   window.addEventListener("resize", () => { if (window.innerWidth > 980) closeNav(); });
   document.querySelector("#publish-button").addEventListener("click", () => openPublish());
-  document.querySelector("#notification-button").addEventListener("click", renderNotifications);
+  document.querySelector("#notification-button").addEventListener("click", () => setRoute("notifications"));
   document.querySelector("#user-button").addEventListener("click", openProfile);
   modalLayer.addEventListener("click", (event) => { if (event.target === modalLayer) closeModal(); });
   document.addEventListener("keydown", (event) => {

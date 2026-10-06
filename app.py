@@ -1067,6 +1067,18 @@ def notify(user_id: int, text: str, kind: str = "system", link: str = "", work_i
     )
 
 
+def notify_once(user_id: int, text: str, kind: str, link: str, work_id=None, chapter_id=None) -> None:
+    """同一用户、同一类型、同一链接只生成一次通知。"""
+    db = get_db()
+    existing = db.execute(
+        "SELECT 1 FROM notifications WHERE user_id = ? AND type = ? AND link = ? LIMIT 1",
+        (user_id, kind[:40], link[:300]),
+    ).fetchone()
+    if existing:
+        return
+    notify(user_id, text, kind, link, work_id, chapter_id)
+
+
 def notify_work_followers(db, work, chapter) -> None:
     """章节发布后通知追更读者，同一用户与章节只生成一次。"""
     if not work or not chapter:
@@ -1082,13 +1094,7 @@ def notify_work_followers(db, work, chapter) -> None:
         (work["id"], work["author_id"]),
     ).fetchall()
     for follower in followers:
-        existing = db.execute(
-            "SELECT 1 FROM notifications WHERE user_id = ? AND type = 'chapter_update' AND link = ? LIMIT 1",
-            (follower["user_id"], link),
-        ).fetchone()
-        if existing:
-            continue
-        notify(follower["user_id"], text, "chapter_update", link, work["id"], chapter["id"])
+        notify_once(follower["user_id"], text, "chapter_update", link, work["id"], chapter["id"])
 
 
 def ensure_message_settings(user_id: int) -> None:
@@ -3237,6 +3243,14 @@ def toggle_like(work_id: int):
         )
         if not effective:
             record_risk(db, g.user["id"], "like_pattern", reason, level="MEDIUM", target_type="like", target_id=f"{g.user['id']}:{work_id}")
+        if int(work["author_id"]) != int(g.user["id"]):
+            notify_once(
+                work["author_id"],
+                f"{g.user['display_name']} 赞了你的作品《{work['title']}》",
+                "like",
+                f"#/work/w{work_id}",
+                work_id,
+            )
     db.commit()
     return json_ok(bootstrap_payload())
 
@@ -3460,6 +3474,17 @@ def create_report():
     )
     notify(g.user["id"], "举报已提交，编辑部将结合必要上下文处理", "report")
     audit("提交举报", "report", str(cursor.lastrowid), f"举报 {target_label}: {reason}", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/notifications/<int:notification_id>/read")
+@require_auth
+def read_notification(notification_id: int):
+    get_db().execute(
+        "UPDATE notifications SET read_at = ? WHERE id = ? AND user_id = ? AND read_at IS NULL",
+        (now_ms(), notification_id, g.user["id"]),
+    )
     get_db().commit()
     return json_ok(bootstrap_payload())
 

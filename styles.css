@@ -999,3 +999,5 @@ html, body { overflow-x: hidden; }
 }
 .workbench-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
 .workbench-summary { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.notification-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+.notification-page .admin-list { margin-top: 0; }
