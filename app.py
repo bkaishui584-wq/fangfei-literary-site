@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS users (
   cover_theme TEXT NOT NULL DEFAULT '',
   literary_preferences TEXT NOT NULL DEFAULT '',
   genres_json TEXT NOT NULL DEFAULT '[]',
+  featured_works_json TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL
 );
 
@@ -166,6 +167,7 @@ CREATE TABLE IF NOT EXISTS works (
   allow_favorites INTEGER NOT NULL DEFAULT 1,
   original_confirmed INTEGER NOT NULL DEFAULT 0,
   rights_confirmed INTEGER NOT NULL DEFAULT 0,
+  quote_text TEXT NOT NULL DEFAULT '',
   views INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -322,11 +324,20 @@ CREATE TABLE IF NOT EXISTS comments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
   text TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   deleted_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_comments_work_created ON comments(work_id, created_at);
+
+CREATE TABLE IF NOT EXISTS comment_likes (
+  comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (comment_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_comment_likes_user ON comment_likes(user_id);
 
 CREATE TABLE IF NOT EXISTS activities (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -335,6 +346,8 @@ CREATE TABLE IF NOT EXISTS activities (
   starts_at TEXT NOT NULL DEFAULT '',
   ends_at TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT '筹备中',
+  activity_type TEXT NOT NULL DEFAULT '社团活动',
+  related_work_ids_json TEXT NOT NULL DEFAULT '[]',
   rules TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
@@ -371,6 +384,14 @@ CREATE TABLE IF NOT EXISTS monthly_awards (
   status TEXT NOT NULL DEFAULT 'active'
 );
 CREATE INDEX IF NOT EXISTS idx_monthly_awards_month ON monthly_awards(month, status, rank);
+
+CREATE TABLE IF NOT EXISTS featured_picks (
+  work_id INTEGER PRIMARY KEY REFERENCES works(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL DEFAULT '',
+  selected_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  selected_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_featured_picks_selected ON featured_picks(selected_at DESC);
 
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -674,6 +695,7 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
             "cover_theme": "TEXT NOT NULL DEFAULT ''",
             "literary_preferences": "TEXT NOT NULL DEFAULT ''",
             "genres_json": "TEXT NOT NULL DEFAULT '[]'",
+            "featured_works_json": "TEXT NOT NULL DEFAULT '[]'",
             "risk_level": "TEXT NOT NULL DEFAULT 'LOW'",
         },
         "works": {
@@ -688,9 +710,10 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
             "topic_id": "INTEGER",
             "citation_declared": "INTEGER NOT NULL DEFAULT 0",
             "citation_sources": "TEXT NOT NULL DEFAULT ''",
+            "quote_text": "TEXT NOT NULL DEFAULT ''",
         },
         "likes": {"effective": "INTEGER NOT NULL DEFAULT 1"},
-        "comments": {"effective": "INTEGER NOT NULL DEFAULT 1"},
+        "comments": {"effective": "INTEGER NOT NULL DEFAULT 1", "parent_id": "INTEGER"},
         "reports": {
             "suspected_original_url": "TEXT NOT NULL DEFAULT ''",
             "handled_action": "TEXT NOT NULL DEFAULT ''",
@@ -698,6 +721,10 @@ def migrate_columns(conn: sqlite3.Connection) -> None:
         "notifications": {
             "work_id": "INTEGER",
             "chapter_id": "INTEGER",
+        },
+        "activities": {
+            "activity_type": "TEXT NOT NULL DEFAULT '社团活动'",
+            "related_work_ids_json": "TEXT NOT NULL DEFAULT '[]'",
         },
     }
     for table, columns in migrations.items():
@@ -903,6 +930,10 @@ def public_user(row) -> dict:
         genres = json.loads(row_value(row, "genres_json", "[]") or "[]")
     except (TypeError, ValueError):
         genres = []
+    try:
+        featured_works = json.loads(row_value(row, "featured_works_json", "[]") or "[]")
+    except (TypeError, ValueError):
+        featured_works = []
     return {
         "id": f"u{row['id']}",
         "name": row["display_name"],
@@ -913,6 +944,7 @@ def public_user(row) -> dict:
         "coverTheme": row_value(row, "cover_theme", "") or "",
         "preferences": row_value(row, "literary_preferences", "") or "",
         "genres": genres if isinstance(genres, list) else [],
+        "featuredWorks": featured_works if isinstance(featured_works, list) else [],
         "joinedAt": iso_time(row["created_at"]),
     }
 
@@ -1067,8 +1099,20 @@ def notify(user_id: int, text: str, kind: str = "system", link: str = "", work_i
     )
 
 
+def notify_once(user_id: int, text: str, kind: str, link: str, work_id=None, chapter_id=None) -> None:
+    """同一用户、同一类型、同一链接只生成一次通知。"""
+    db = get_db()
+    existing = db.execute(
+        "SELECT 1 FROM notifications WHERE user_id = ? AND type = ? AND link = ? LIMIT 1",
+        (user_id, kind[:40], link[:300]),
+    ).fetchone()
+    if existing:
+        return
+    notify(user_id, text, kind, link, work_id, chapter_id)
+
+
 def notify_work_followers(db, work, chapter) -> None:
-    """章节发布后通知追更读者，同一用户与章节只生成一次。"""
+    """章节发布后通知追更读者和关注作者的人，同一用户与章节只生成一次。"""
     if not work or not chapter:
         return
     if work["status"] != "published" or not bool(row_value(work, "is_public", 1)):
@@ -1077,18 +1121,42 @@ def notify_work_followers(db, work, chapter) -> None:
         return
     link = f"#/chapter/ch{chapter['id']}"
     text = f"《{work['title']}》更新了\n第{int(chapter['chapter_number'])}章：{chapter['title']}"
+    follower_ids = {
+        int(row["user_id"])
+        for row in db.execute(
+            "SELECT user_id FROM work_follows WHERE work_id = ? AND user_id <> ?",
+            (work["id"], work["author_id"]),
+        ).fetchall()
+    }
+    follower_ids.update(
+        int(row["follower_id"])
+        for row in db.execute(
+            "SELECT follower_id FROM follows WHERE author_id = ? AND follower_id <> ?",
+            (work["author_id"], work["author_id"]),
+        ).fetchall()
+    )
+    for user_id in follower_ids:
+        notify_once(user_id, text, "chapter_update", link, work["id"], chapter["id"])
+
+
+def notify_author_followers(db, work_id: int) -> None:
+    """Notify an author's followers when a new work is published."""
+    work = db.execute(
+        "SELECT w.*, u.display_name AS author_name FROM works w JOIN users u ON u.id = w.author_id WHERE w.id = ?",
+        (work_id,),
+    ).fetchone()
+    if not work or work["status"] != "published" or not bool(row_value(work, "is_public", 1)):
+        return
+    if (row_value(work, "visibility", "PUBLIC") or "PUBLIC") != "PUBLIC":
+        return
+    link = f"#/work/w{work_id}"
+    text = f"{work['author_name']} 发布了新作品《{work['title']}》"
     followers = db.execute(
-        "SELECT user_id FROM work_follows WHERE work_id = ? AND user_id <> ?",
-        (work["id"], work["author_id"]),
+        "SELECT follower_id FROM follows WHERE author_id = ?",
+        (work["author_id"],),
     ).fetchall()
     for follower in followers:
-        existing = db.execute(
-            "SELECT 1 FROM notifications WHERE user_id = ? AND type = 'chapter_update' AND link = ? LIMIT 1",
-            (follower["user_id"], link),
-        ).fetchone()
-        if existing:
-            continue
-        notify(follower["user_id"], text, "chapter_update", link, work["id"], chapter["id"])
+        notify_once(follower["follower_id"], text, "author_new_work", link, work_id)
 
 
 def ensure_message_settings(user_id: int) -> None:
@@ -1204,7 +1272,9 @@ def build_book_shares(db, user_id: int | None) -> list[dict]:
 
 def _ranking_period_start(period: str) -> int:
     now = datetime.now(timezone.utc)
-    if period == "month":
+    if period == "week":
+        value = now - timedelta(days=7)
+    elif period == "month":
         value = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     elif period == "quarter":
         value = datetime(now.year, ((now.month - 1) // 3) * 3 + 1, 1, tzinfo=timezone.utc)
@@ -1494,6 +1564,7 @@ def run_agent_review(work_id: int, author_id: int, title: str, body, category: s
                 "UPDATE works SET status = 'published', review_note = '', published_at = ?, updated_at = ? WHERE id = ?",
                 (created_at, created_at, work_id),
             )
+            notify_author_followers(db, work_id)
         db.commit()
         audit("Agent 审核", "work", str(work_id), f"Agent {result['risk_level']}，{result['recommendation']}", None)
         db.commit()
@@ -1562,19 +1633,23 @@ def remove_old_avatar(value: str) -> None:
 
 
 def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) -> dict:
-    periods = {name: _ranking_period_start(name) for name in ("month", "quarter", "year", "all")}
+    periods = {name: _ranking_period_start(name) for name in ("week", "month", "quarter", "year", "all")}
     author_names = {item.get("id"): item.get("name", "") for item in (authors or [])}
     work_rows = db.execute(
         """
-        SELECT w.id, w.author_id, w.title, w.category, w.excerpt, w.views, w.body_json,
-               w.published_at, w.created_at, u.display_name AS author_name
+        SELECT w.id, w.author_id, w.title, w.category, w.excerpt, w.quote_text, w.views, w.body_json,
+               w.work_format, w.serial_status, w.updated_at, w.published_at, w.created_at,
+               u.display_name AS author_name
         FROM works w JOIN users u ON u.id = w.author_id
         WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'
         ORDER BY COALESCE(w.published_at, w.created_at) DESC
         """
     ).fetchall()
+    featured_ids = {
+        int(row["work_id"])
+        for row in db.execute("SELECT work_id FROM featured_picks").fetchall()
+    }
 
-    # 每个指标只做一次分组统计，避免逐作品逐时间范围查询导致上百次数据库往返
     metric_specs = (
         ("views", "work_views", "viewed_at", ""),
         ("likes", "likes", "created_at", "effective = 1"),
@@ -1587,18 +1662,20 @@ def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) ->
         rows = db.execute(
             f"""
             SELECT work_id, COUNT(*) AS total,
+                   SUM(CASE WHEN {column} >= ? THEN 1 ELSE 0 END) AS recent_week,
                    SUM(CASE WHEN {column} >= ? THEN 1 ELSE 0 END) AS recent_month,
                    SUM(CASE WHEN {column} >= ? THEN 1 ELSE 0 END) AS recent_quarter,
                    SUM(CASE WHEN {column} >= ? THEN 1 ELSE 0 END) AS recent_year
             FROM {table}{where}
             GROUP BY work_id
             """,
-            (periods["month"], periods["quarter"], periods["year"]),
+            (periods["week"], periods["month"], periods["quarter"], periods["year"]),
         ).fetchall()
         per_period: dict[str, dict[int, int]] = {name: {} for name in periods}
         for item in rows:
             work_id = int(item["work_id"])
             per_period["all"][work_id] = int(item["total"] or 0)
+            per_period["week"][work_id] = int(item["recent_week"] or 0)
             per_period["month"][work_id] = int(item["recent_month"] or 0)
             per_period["quarter"][work_id] = int(item["recent_quarter"] or 0)
             per_period["year"][work_id] = int(item["recent_year"] or 0)
@@ -1631,7 +1708,12 @@ def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) ->
                     "author": row["author_name"],
                     "category": row["category"],
                     "excerpt": row["excerpt"],
+                    "quoteText": row_value(row, "quote_text", "") or "",
+                    "workFormat": row_value(row, "work_format", "single") or "single",
+                    "serialStatus": row_value(row, "serial_status", "ONGOING") or "ONGOING",
                     "publishedAt": row["published_at"] or row["created_at"],
+                    "updatedAt": row["updated_at"] or row["published_at"] or row["created_at"],
+                    "featured": int(work_id) in featured_ids,
                     "views": views,
                     "likes": likes,
                     "favorites": favorites,
@@ -1664,7 +1746,7 @@ def build_rankings(db: sqlite3.Connection, authors: list[dict] | None = None) ->
         """
         award_params: list[object] = []
         current = datetime.now(timezone.utc)
-        if period == "month":
+        if period in {"week", "month"}:
             award_sql += " AND ma.month = ?"
             award_params.append(current.strftime("%Y-%m"))
         elif period == "quarter":
@@ -1877,6 +1959,89 @@ def run_chapter_agent_review(chapter_id: int, author_id: int, work_id: int, titl
         }
 
 
+def build_admin_overview(db: sqlite3.Connection) -> dict:
+    """只读运营概览，所有数字均来自真实表。"""
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_ms = int(today.timestamp() * 1000)
+    def count(table: str, where: str = "", params: tuple = ()) -> int:
+        sql = f"SELECT COUNT(*) AS count FROM {table}"
+        if where:
+            sql += f" WHERE {where}"
+        row = db.execute(sql, params).fetchone()
+        return int(row["count"] or 0)
+    popular = [
+        {
+            "id": f"w{row['id']}",
+            "title": row["title"],
+            "author": row["author_name"],
+            "views": int(row["views"] or 0),
+            "likes": int(row["likes_count"] or 0),
+        }
+        for row in db.execute(
+            """
+            SELECT w.id, w.title, w.views, u.display_name AS author_name,
+              (SELECT COUNT(*) FROM likes l WHERE l.work_id = w.id AND l.effective = 1) AS likes_count
+            FROM works w JOIN users u ON u.id = w.author_id
+            WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'
+            ORDER BY w.views DESC, likes_count DESC, w.created_at DESC LIMIT 5
+            """
+        ).fetchall()
+    ]
+    active_authors = [
+        {
+            "id": f"u{row['author_id']}",
+            "name": row["author_name"],
+            "views": int(row["views_count"] or 0),
+            "works": int(row["work_count"] or 0),
+        }
+        for row in db.execute(
+            """
+            SELECT w.author_id, u.display_name AS author_name,
+              SUM(w.views) AS views_count, COUNT(*) AS work_count
+            FROM works w JOIN users u ON u.id = w.author_id
+            WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'
+            GROUP BY w.author_id, u.display_name
+            ORDER BY views_count DESC, work_count DESC LIMIT 5
+            """
+        ).fetchall()
+    ]
+    latest = [
+        {
+            "id": f"w{row['id']}",
+            "title": row["title"],
+            "author": row["author_name"],
+            "at": iso_time(row["published_at"] or row["created_at"]),
+        }
+        for row in db.execute(
+            """
+            SELECT w.id, w.title, w.published_at, w.created_at, u.display_name AS author_name
+            FROM works w JOIN users u ON u.id = w.author_id
+            WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'
+            ORDER BY COALESCE(w.published_at, w.created_at) DESC LIMIT 5
+            """
+        ).fetchall()
+    ]
+    return {
+        "today": {
+            "users": count("users", "created_at >= ?", (today_ms,)),
+            "works": count("works", "created_at >= ?", (today_ms,)),
+            "comments": count("comments", "created_at >= ? AND deleted_at IS NULL", (today_ms,)),
+            "views": count("work_views", "viewed_at >= ?", (today_ms,)),
+            "favorites": count("favorites", "created_at >= ?", (today_ms,)),
+        },
+        "pending": {
+            "reviews": count("works", "status IN ('pending', 'pending_agent', 'pending_review')"),
+            "reports": count("reports", "status IN ('待处理', '处理中')"),
+            "risks": count("risk_events", "status = 'pending'"),
+        },
+        "content": {
+            "popular": popular,
+            "activeAuthors": active_authors,
+            "latest": latest,
+        },
+    }
+
+
 def build_state(user) -> dict:
     db = get_db()
     user_id = user["id"] if user else None
@@ -1888,7 +2053,8 @@ def build_state(user) -> dict:
         (SELECT COUNT(*) FROM likes l WHERE l.work_id = w.id AND l.effective = 1) AS effective_likes_count,
         (SELECT COUNT(*) FROM favorites f WHERE f.work_id = w.id) AS favorites_count,
         (SELECT COUNT(*) FROM comments c WHERE c.work_id = w.id AND c.deleted_at IS NULL) AS comments_count,
-        (SELECT COUNT(*) FROM comments c WHERE c.work_id = w.id AND c.deleted_at IS NULL AND c.effective = 1) AS effective_comments_count
+        (SELECT COUNT(*) FROM comments c WHERE c.work_id = w.id AND c.deleted_at IS NULL AND c.effective = 1) AS effective_comments_count,
+        (SELECT COUNT(*) FROM work_follows wf WHERE wf.work_id = w.id) AS follow_count
       FROM works w JOIN users u ON u.id = w.author_id
     """
     params: list[object] = []
@@ -1913,6 +2079,24 @@ def build_state(user) -> dict:
             [row["id"] for row in work_rows],
         ).fetchall():
             comments_by_work.setdefault(int(comment["work_id"]), []).append(comment)
+    comment_like_counts: dict[int, int] = {}
+    liked_comments: set[int] = set()
+    comment_ids = [int(comment["id"]) for rows in comments_by_work.values() for comment in rows]
+    if comment_ids:
+        comment_placeholders = ", ".join("?" for _ in comment_ids)
+        for row in db.execute(
+            f"SELECT comment_id, COUNT(*) AS total FROM comment_likes WHERE comment_id IN ({comment_placeholders}) GROUP BY comment_id",
+            comment_ids,
+        ).fetchall():
+            comment_like_counts[int(row["comment_id"])] = int(row["total"])
+        if user_id:
+            liked_comments = {
+                int(row["comment_id"])
+                for row in db.execute(
+                    f"SELECT comment_id FROM comment_likes WHERE user_id = ? AND comment_id IN ({comment_placeholders})",
+                    [user_id] + comment_ids,
+                ).fetchall()
+            }
     chapters_by_work: dict[int, list] = {}
     if work_rows:
         placeholders = ", ".join("?" for _ in work_rows)
@@ -1958,13 +2142,19 @@ def build_state(user) -> dict:
     for row in work_rows:
         comments = []
         for comment in comments_by_work.get(int(row["id"]), []):
+            comment_id = int(comment["id"])
             comments.append(
                 {
-                    "id": f"c{comment['id']}",
+                    "id": f"c{comment_id}",
                     "who": comment["author_name"],
                     "userId": f"u{comment['user_id']}",
                     "text": comment["text"],
                     "at": comment["created_at"],
+                    "parentId": f"c{comment['parent_id']}" if row_value(comment, "parent_id") else "",
+                    "likes": comment_like_counts.get(comment_id, 0),
+                    "liked": comment_id in liked_comments,
+                    "mine": bool(user_id and int(comment["user_id"]) == int(user_id)),
+                    "canDelete": bool(user_id and (int(comment["user_id"]) == int(user_id) or is_admin)),
                 }
             )
         visible_chapters = []
@@ -1991,7 +2181,9 @@ def build_state(user) -> dict:
                 "views": row["views"],
                 "favorites": row["favorites_count"],
                 "commentsCount": row["comments_count"],
+                "followCount": row_value(row, "follow_count", 0) or 0,
                 "excerpt": row["excerpt"],
+                "quoteText": row_value(row, "quote_text", "") or "",
                 "body": json.loads(row["body_json"] or "[]"),
                 "comments": comments,
                 "createdAt": row["published_at"] or row["created_at"],
@@ -2046,17 +2238,22 @@ def build_state(user) -> dict:
         })
         authors.append(author)
 
-    activities = [
-        {
+    activities = []
+    for row in db.execute("SELECT * FROM activities ORDER BY created_at DESC").fetchall():
+        try:
+            related_work_ids = json.loads(row_value(row, "related_work_ids_json", "[]") or "[]")
+        except (TypeError, ValueError):
+            related_work_ids = []
+        activities.append({
             "id": f"e{row['id']}",
             "title": row["title"],
             "desc": row["description"],
             "date": " - ".join(value for value in (row["starts_at"], row["ends_at"]) if value),
             "status": row["status"],
+            "type": row_value(row, "activity_type", "社团活动") or "社团活动",
+            "relatedWorkIds": [f"w{item}" for item in related_work_ids if parse_numeric_id(item)],
             "rules": row["rules"],
-        }
-        for row in db.execute("SELECT * FROM activities ORDER BY created_at DESC").fetchall()
-    ]
+        })
 
     announcement_sql = "SELECT * FROM announcements"
     if not is_admin:
@@ -2111,8 +2308,30 @@ def build_state(user) -> dict:
         ).fetchall()
     ]
     monthly_picks = [row["workId"] for row in monthly_awards]
+    featured_picks = [
+        {
+            "workId": f"w{row['work_id']}",
+            "reason": row["reason"],
+            "selectedAt": iso_time(row["selected_at"]),
+            "selectedBy": f"u{row['selected_by']}" if row["selected_by"] else "",
+            "selectedByName": row["selected_by_name"] or "",
+        }
+        for row in db.execute(
+            """
+            SELECT fp.*, u.display_name AS selected_by_name
+            FROM featured_picks fp
+            LEFT JOIN users u ON u.id = fp.selected_by
+            JOIN works w ON w.id = fp.work_id
+            WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC'
+            ORDER BY fp.selected_at DESC
+            """
+        ).fetchall()
+    ]
 
     followed = []
+    followers = []
+    follower_users = []
+    following_users = []
     followed_works = []
     blocked = []
     blocked_users = []
@@ -2145,6 +2364,23 @@ def build_state(user) -> dict:
         ).fetchall()
         blocked = [f"u{row['id']}" for row in blocked_rows]
         blocked_users = [public_user(row) for row in blocked_rows]
+        follower_rows = db.execute(
+            """
+            SELECT u.* FROM follows f JOIN users u ON u.id = f.follower_id
+            WHERE f.author_id = ? ORDER BY f.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        followers = [f"u{row['id']}" for row in follower_rows]
+        follower_users = [public_user(row) for row in follower_rows]
+        following_rows = db.execute(
+            """
+            SELECT u.* FROM follows f JOIN users u ON u.id = f.author_id
+            WHERE f.follower_id = ? ORDER BY f.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        following_users = [public_user(row) for row in following_rows]
         liked = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM likes WHERE user_id = ?", (user_id,)).fetchall()]
         favorited = [f"w{row['work_id']}" for row in db.execute("SELECT work_id FROM favorites WHERE user_id = ?", (user_id,)).fetchall()]
         bookshelf = [
@@ -2282,19 +2518,30 @@ def build_state(user) -> dict:
                 """
             ).fetchall()
         ]
-        reports = [
-            {
+        report_rows = db.execute(
+            "SELECT r.*, u.display_name AS reporter_name FROM reports r LEFT JOIN users u ON u.id = r.reporter_id ORDER BY r.created_at DESC LIMIT 200"
+        ).fetchall()
+        reports = []
+        for row in report_rows:
+            risk = assess_report_risk(db, row)
+            reports.append({
                 "id": f"r{row['id']}",
                 "type": row["type"],
+                "targetId": row["target_id"],
                 "target": row["target_label"],
                 "reason": row["reason"],
                 "detail": row["detail"],
                 "message": row["message_excerpt"],
+                "suspectedUrl": row_value(row, "suspected_original_url", "") or "",
+                "handledAction": row_value(row, "handled_action", "") or "",
+                "reporter": row["reporter_name"] or "匿名用户",
                 "at": iso_time(row["created_at"]),
+                "handledAt": iso_time(row["handled_at"]) if row_value(row, "handled_at") else "",
                 "status": row["status"],
-            }
-            for row in db.execute("SELECT * FROM reports ORDER BY created_at DESC LIMIT 200").fetchall()
-        ]
+                "risk": risk["level"],
+                "riskScore": risk["score"],
+                "riskReasons": risk["reasons"],
+            })
         audit_logs = [
             {
                 "id": f"l{row['id']}",
@@ -2440,6 +2687,9 @@ def build_state(user) -> dict:
         "schemaVersion": 13,
         "currentUser": current_user,
         "followed": followed,
+        "followers": followers,
+        "followerUsers": follower_users,
+        "followingUsers": following_users,
         "followedWorks": followed_works,
         "blocked": blocked,
         "blockedUsers": blocked_users,
@@ -2460,6 +2710,7 @@ def build_state(user) -> dict:
         "messageSettings": message_settings,
         "monthlyPicks": monthly_picks,
         "monthlyAwards": monthly_awards,
+        "featuredPicks": featured_picks,
         "conversations": conversations,
         "users": users,
         "adminRoles": admin_roles,
@@ -2471,6 +2722,7 @@ def build_state(user) -> dict:
         "agentResults": agent_results,
         "agentTasks": agent_tasks,
         "systemHealth": build_system_health(db, is_admin),
+        "adminOverview": build_admin_overview(db) if is_admin else {},
         "rankings": build_rankings(db, authors),
         "rankingWeights": RANKING_WEIGHTS,
     }
@@ -2572,6 +2824,38 @@ def handle_server_error(_error):
 @app.get("/")
 def index():
     return send_from_directory(BASE_DIR, "index.html")
+
+
+@app.get("/robots.txt")
+def robots_txt():
+    body = "\n".join([
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /api/",
+        f"Sitemap: {request.host_url.rstrip('/')}/sitemap.xml",
+        "",
+    ])
+    return Response(body, mimetype="text/plain")
+
+
+@app.get("/sitemap.xml")
+def sitemap_xml():
+    base = request.host_url.rstrip("/")
+    entries = [f"  <url><loc>{base}/</loc></url>"]
+    for row in get_db().execute(
+        "SELECT id FROM works WHERE status = 'published' AND is_public = 1 AND visibility = 'PUBLIC' "
+        "ORDER BY COALESCE(published_at, created_at) DESC LIMIT 5000"
+    ).fetchall():
+        entries.append(f"  <url><loc>{base}/#/work/w{int(row['id'])}</loc></url>")
+    for row in get_db().execute(
+        "SELECT DISTINCT u.id FROM users u JOIN works w ON w.author_id = u.id "
+        "WHERE w.status = 'published' AND w.is_public = 1 AND w.visibility = 'PUBLIC' LIMIT 2000"
+    ).fetchall():
+        entries.append(f"  <url><loc>{base}/#/author/u{int(row['id'])}</loc></url>")
+    body = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+            + "\n".join(entries) + "\n</urlset>\n")
+    return Response(body, mimetype="application/xml")
 
 
 @app.get("/<path:filename>")
@@ -2701,6 +2985,38 @@ def update_profile():
     return json_ok(bootstrap_payload())
 
 
+@app.post("/api/profile/featured-works")
+@require_auth
+def save_featured_works():
+    payload = request_json()
+    raw_ids = payload.get("workIds") if isinstance(payload.get("workIds"), list) else []
+    work_ids = []
+    for item in raw_ids[:3]:
+        work_id = parse_numeric_id(item)
+        if not work_id:
+            return json_error("代表作作品无效", 400)
+        if work_id not in work_ids:
+            work_ids.append(work_id)
+    db = get_db()
+    if work_ids:
+        placeholders = ", ".join("?" for _ in work_ids)
+        rows = db.execute(
+            f"""SELECT id FROM works WHERE author_id = ? AND status = 'published'
+                AND is_public = 1 AND visibility = 'PUBLIC' AND id IN ({placeholders})""",
+            [g.user["id"]] + work_ids,
+        ).fetchall()
+        allowed = {int(row["id"]) for row in rows}
+        if any(work_id not in allowed for work_id in work_ids):
+            return json_error("代表作只能选择自己的公开作品", 403)
+    db.execute(
+        "UPDATE users SET featured_works_json = ? WHERE id = ?",
+        (json.dumps([f"w{work_id}" for work_id in work_ids], ensure_ascii=False), g.user["id"]),
+    )
+    audit("设置代表作", "user", str(g.user["id"]), "更新作者代表作", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
 def save_work(work_id: int | None = None):
     payload = request_json()
     action = clean_text(payload.get("action") or "submit", 10)
@@ -2742,6 +3058,7 @@ def save_work(work_id: int | None = None):
     citation_sources = clean_text(payload.get("citationSources"), 500) if has_citation else ""
     topic_id = parse_numeric_id(payload.get("topicId"))
     excerpt = clean_text(payload.get("excerpt"), 200) or (body[0][:90] if body else "")
+    quote_text = clean_text(payload.get("quoteText"), 160)
     timestamp = now_ms()
     db = get_db()
     if topic_id and not db.execute("SELECT 1 FROM topics WHERE id = ?", (topic_id,)).fetchone():
@@ -2755,15 +3072,15 @@ def save_work(work_id: int | None = None):
             INSERT INTO works (
               author_id, title, category, work_format, serial_status, tags_json, excerpt, body_json, status, review_note,
               is_public, allow_comments, allow_favorites, original_confirmed, rights_confirmed,
-              visibility, topic_id, citation_declared, citation_sources,
+              visibility, topic_id, citation_declared, citation_sources, quote_text,
               created_at, updated_at, published_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 g.user["id"], title, category, work_format, serial_status,
                 json.dumps(tags, ensure_ascii=False), excerpt, json.dumps(body, ensure_ascii=False), status,
                 int(is_public), int(allow_comments), int(allow_favorites), int(original_confirmed), int(rights_confirmed),
-                visibility, topic_id, int(has_citation), citation_sources, timestamp, timestamp, None,
+                visibility, topic_id, int(has_citation), citation_sources, quote_text, timestamp, timestamp, None,
             ),
         )
         work_id = cursor.lastrowid
@@ -2783,14 +3100,14 @@ def save_work(work_id: int | None = None):
             UPDATE works SET title = ?, category = ?, work_format = ?, serial_status = ?, tags_json = ?, excerpt = ?, body_json = ?,
               status = ?, review_note = '', is_public = ?, allow_comments = ?, allow_favorites = ?,
               original_confirmed = ?, rights_confirmed = ?, visibility = ?, topic_id = ?,
-              citation_declared = ?, citation_sources = ?, updated_at = ?, published_at = NULL
+              citation_declared = ?, citation_sources = ?, quote_text = ?, updated_at = ?, published_at = NULL
             WHERE id = ? AND author_id = ?
             """,
             (
                 title, category, work_format, serial_status, json.dumps(tags, ensure_ascii=False), excerpt,
                 json.dumps(body, ensure_ascii=False), status, int(is_public), int(allow_comments),
                 int(allow_favorites), int(original_confirmed), int(rights_confirmed),
-                visibility, topic_id, int(has_citation), citation_sources, timestamp,
+                visibility, topic_id, int(has_citation), citation_sources, quote_text, timestamp,
                 work_id, g.user["id"],
             ),
         )
@@ -3235,6 +3552,14 @@ def toggle_like(work_id: int):
         )
         if not effective:
             record_risk(db, g.user["id"], "like_pattern", reason, level="MEDIUM", target_type="like", target_id=f"{g.user['id']}:{work_id}")
+        if int(work["author_id"]) != int(g.user["id"]):
+            notify_once(
+                work["author_id"],
+                f"{g.user['display_name']} 赞了你的作品《{work['title']}》",
+                "like",
+                f"#/work/w{work_id}",
+                work_id,
+            )
     db.commit()
     return json_ok(bootstrap_payload())
 
@@ -3267,16 +3592,68 @@ def create_comment(work_id: int):
         return json_error("作者已关闭评论", 403)
     payload = request_json()
     text = clean_text(payload.get("text"), 500, required=True)
-    effective, reason = evaluate_comment_risk(get_db(), g.user, work, text)
-    cursor = get_db().execute(
-        "INSERT INTO comments (work_id, user_id, text, created_at, effective) VALUES (?, ?, ?, ?, ?)",
-        (work_id, g.user["id"], text, now_ms(), int(effective)),
+    db = get_db()
+    parent = None
+    parent_id = parse_numeric_id(payload.get("parentId")) if payload.get("parentId") else None
+    if parent_id:
+        parent = db.execute(
+            "SELECT * FROM comments WHERE id = ? AND work_id = ? AND deleted_at IS NULL",
+            (parent_id, work_id),
+        ).fetchone()
+        if not parent:
+            return json_error("要回复的评论不存在", 404)
+    effective, reason = evaluate_comment_risk(db, g.user, work, text)
+    cursor = db.execute(
+        "INSERT INTO comments (work_id, user_id, parent_id, text, created_at, effective) VALUES (?, ?, ?, ?, ?, ?)",
+        (work_id, g.user["id"], parent_id, text, now_ms(), int(effective)),
     )
+    comment_id = cursor.lastrowid
     if not effective:
-        record_risk(get_db(), g.user["id"], "comment_pattern", reason, level="MEDIUM", target_type="comment", target_id=str(cursor.lastrowid))
+        record_risk(db, g.user["id"], "comment_pattern", reason, level="MEDIUM", target_type="comment", target_id=str(comment_id))
     if work["author_id"] != g.user["id"]:
         notify(work["author_id"], f"{g.user['display_name']} 评论了《{work['title']}》", "comment", f"#/work/w{work_id}")
-    audit("发表评论", "comment", str(cursor.lastrowid), f"评论作品《{work['title']}》", g.user["id"])
+    if parent and int(parent["user_id"]) != int(g.user["id"]):
+        notify(parent["user_id"], f"{g.user['display_name']} 回复了你的评论", "comment", f"#/work/w{work_id}")
+    audit("发表评论", "comment", str(comment_id), f"评论作品《{work['title']}》", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/comments/<int:comment_id>/like")
+@require_auth
+def toggle_comment_like(comment_id: int):
+    comment = get_db().execute("SELECT * FROM comments WHERE id = ? AND deleted_at IS NULL", (comment_id,)).fetchone()
+    if not comment:
+        return json_error("评论不存在", 404)
+    if not public_work(int(comment["work_id"])):
+        return json_error("评论不存在或不可访问", 404)
+    db = get_db()
+    existing = db.execute(
+        "SELECT 1 FROM comment_likes WHERE comment_id = ? AND user_id = ?",
+        (comment_id, g.user["id"]),
+    ).fetchone()
+    if existing:
+        db.execute("DELETE FROM comment_likes WHERE comment_id = ? AND user_id = ?", (comment_id, g.user["id"]))
+    else:
+        db.execute(
+            "INSERT INTO comment_likes (comment_id, user_id, created_at) VALUES (?, ?, ?)",
+            (comment_id, g.user["id"], now_ms()),
+        )
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/comments/<int:comment_id>/delete")
+@require_auth
+def delete_own_comment(comment_id: int):
+    comment = get_db().execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
+    if not comment:
+        return json_error("评论不存在", 404)
+    is_owner = int(comment["user_id"]) == int(g.user["id"])
+    if not is_owner and not (g.user["role"] == "admin" and admin_level(g.user)):
+        return json_error("只能删除自己的评论", 403)
+    get_db().execute("UPDATE comments SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", (now_ms(), comment_id))
+    audit("删除评论", "comment", str(comment_id), "删除评论", g.user["id"])
     get_db().commit()
     return json_ok(bootstrap_payload())
 
@@ -3441,6 +3818,45 @@ def save_message_settings():
     return json_ok(bootstrap_payload())
 
 
+REPORT_TYPES = {"作品", "章节", "作品评论", "章评", "书友分享", "用户", "私信", "私信消息", "版权举报", "版权 / 疑似抄袭", "评论举报"}
+
+
+def assess_report_risk(db, row) -> dict:
+    """基于真实库内信号给出风险分级，仅辅助人工处理，不自动处罚。"""
+    score = 0
+    reasons = []
+    reason = str(row["reason"] or "")
+    rtype = str(row["type"] or "")
+    if "版权" in reason or "抄袭" in reason:
+        score += 2
+        reasons.append("版权或抄袭类举报")
+    if rtype in {"作品", "章节"}:
+        score += 1
+        reasons.append("公开内容举报")
+    target_id = parse_numeric_id(row["target_id"])
+    if target_id and rtype in {"作品", "版权举报", "版权 / 疑似抄袭"}:
+        similar = db.execute("SELECT COUNT(*) AS total FROM plagiarism_checks WHERE work_id = ?", (target_id,)).fetchone()
+        if similar and int(similar["total"]) > 0:
+            score += 4
+            reasons.append("该作品已有疑似相似记录")
+    duplicates = db.execute(
+        "SELECT COUNT(*) AS total FROM reports WHERE target_id = ? AND type = ? AND status IN ('待处理', '处理中')",
+        (row["target_id"], rtype),
+    ).fetchone()
+    if duplicates and int(duplicates["total"]) > 1:
+        score += 2
+        reasons.append("同一对象存在多条未处理举报")
+    reporter = user_row(row["reporter_id"])
+    if reporter and _account_age_ms(reporter) < 24 * 3600 * 1000:
+        reasons.append("举报账号注册不足一天，已记录来源")
+    if row["message_excerpt"]:
+        reasons.append("举报包含被举报私信片段")
+    risk = "高" if score >= 5 else "中" if score >= 3 else "低"
+    if not reasons:
+        reasons.append("暂未发现额外风险信号")
+    return {"level": risk, "score": score, "reasons": reasons}
+
+
 @app.post("/api/reports")
 @require_auth
 def create_report():
@@ -3452,12 +3868,34 @@ def create_report():
     detail = clean_text(payload.get("detail"), 500)
     message_excerpt = clean_text(payload.get("message"), 500)
     suspected_url = clean_text(payload.get("suspectedOriginalUrl"), 300)
-    cursor = get_db().execute(
+    if report_type not in REPORT_TYPES:
+        return json_error("举报类型无效", 400)
+    if not target_id:
+        return json_error("请选择要举报的对象", 400)
+    db = get_db()
+    existing = db.execute(
+        "SELECT 1 FROM reports WHERE reporter_id = ? AND type = ? AND target_id = ? AND status IN ('待处理', '处理中') LIMIT 1",
+        (g.user["id"], report_type, target_id),
+    ).fetchone()
+    if existing:
+        return json_error("你已经举报过该对象，编辑部正在处理", 409)
+    cursor = db.execute(
         "INSERT INTO reports (reporter_id, type, target_id, target_label, reason, detail, message_excerpt, suspected_original_url, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?)",
         (g.user["id"], report_type, target_id, target_label, reason, detail, message_excerpt, suspected_url, now_ms()),
     )
     notify(g.user["id"], "举报已提交，编辑部将结合必要上下文处理", "report")
     audit("提交举报", "report", str(cursor.lastrowid), f"举报 {target_label}: {reason}", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/notifications/<int:notification_id>/read")
+@require_auth
+def read_notification(notification_id: int):
+    get_db().execute(
+        "UPDATE notifications SET read_at = ? WHERE id = ? AND user_id = ? AND read_at IS NULL",
+        (now_ms(), notification_id, g.user["id"]),
+    )
     get_db().commit()
     return json_ok(bootstrap_payload())
 
@@ -3838,6 +4276,8 @@ def review_work(work_id: int):
         (reviewed_at, g.user["id"], work_id),
     )
     label = {"publish": "通过审核", "reject": "退回修改", "hide": "下架作品"}[action]
+    if action == "publish":
+        notify_author_followers(get_db(), work_id)
     notify(work["author_id"], f"作品《{work['title']}》{label}。" + (f" 审核意见：{note}" if note else ""), "work", f"#/work/w{work_id}")
     audit(label, "work", str(work_id), f"{label}《{work['title']}》", g.user["id"])
     get_db().commit()
@@ -3930,11 +4370,16 @@ def update_report_status(report_id: int):
     row = get_db().execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
     if not row:
         return json_error("举报记录不存在", 404)
+    if status in {"已处理", "已驳回"}:
+        conclusion = f"你的举报已由编辑部{status}"
+        if action:
+            conclusion += f"（{action}）"
+        notify(row["reporter_id"], f"{conclusion}：{row['target_label']}", "report", "#/notifications")
     get_db().execute(
         "UPDATE reports SET status = ?, handled_action = ?, handled_at = ?, handled_by = ? WHERE id = ?",
         (status, action, now_ms(), g.user["id"], report_id),
     )
-    if action in {"暂时隐藏", "确认侵权并下架"} and row["type"] in {"作品", "版权举报"}:
+    if action in {"暂时隐藏", "确认侵权并下架"} and row["type"] in {"作品", "版权举报", "版权 / 疑似抄袭"}:
         target_work = parse_numeric_id(row["target_id"])
         if target_work:
             get_db().execute("UPDATE works SET status = 'hidden', updated_at = ? WHERE id = ?", (now_ms(), target_work))
@@ -3942,6 +4387,14 @@ def update_report_status(report_id: int):
         target_share = parse_numeric_id(row["target_id"])
         if target_share:
             get_db().execute("UPDATE book_shares SET status = 'hidden', updated_at = ? WHERE id = ?", (now_ms(), target_share))
+    elif action == "暂时隐藏" and row["type"] in {"作品评论", "评论举报"}:
+        target_comment = parse_numeric_id(row["target_id"])
+        if target_comment:
+            get_db().execute("UPDATE comments SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", (now_ms(), target_comment))
+    elif action == "暂时隐藏" and row["type"] == "章评":
+        target_chapter_comment = parse_numeric_id(row["target_id"])
+        if target_chapter_comment:
+            get_db().execute("UPDATE chapter_comments SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", (now_ms(), target_chapter_comment))
     audit("处理举报", "report", str(report_id), f"举报状态更新为{status}" + (f"，动作：{action}" if action else ""), g.user["id"])
     get_db().commit()
     return json_ok(bootstrap_payload())
@@ -3956,12 +4409,30 @@ def create_activity():
     starts_at = clean_text(payload.get("startsAt"), 30)
     ends_at = clean_text(payload.get("endsAt"), 30)
     status = clean_text(payload.get("status") or "筹备中", 20)
+    activity_type = clean_text(payload.get("activityType") or "社团活动", 20)
     rules = clean_text(payload.get("rules"), 1000)
     if status not in {"筹备中", "报名中", "进行中", "已结束"}:
         return json_error("活动状态无效", 400)
+    if activity_type not in {"主题征文", "读书会", "交流会", "作品点评", "社团活动"}:
+        return json_error("活动类型无效", 400)
+    raw_related = payload.get("relatedWorkIds") if isinstance(payload.get("relatedWorkIds"), list) else []
+    related_ids = []
+    for item in raw_related[:20]:
+        related_id = parse_numeric_id(item)
+        if related_id and related_id not in related_ids:
+            related_ids.append(related_id)
+    if related_ids:
+        placeholders = ", ".join("?" for _ in related_ids)
+        valid_rows = get_db().execute(
+            f"SELECT id FROM works WHERE id IN ({placeholders}) AND status = 'published' AND is_public = 1 AND visibility = 'PUBLIC'",
+            related_ids,
+        ).fetchall()
+        valid_ids = {int(row["id"]) for row in valid_rows}
+        if any(item not in valid_ids for item in related_ids):
+            return json_error("相关作品只能选择公开作品", 400)
     cursor = get_db().execute(
-        "INSERT INTO activities (title, description, starts_at, ends_at, status, rules, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (title, description, starts_at, ends_at, status, rules, now_ms()),
+        "INSERT INTO activities (title, description, starts_at, ends_at, status, activity_type, related_work_ids_json, rules, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (title, description, starts_at, ends_at, status, activity_type, json.dumps(related_ids, ensure_ascii=False), rules, now_ms()),
     )
     audit("创建活动", "activity", str(cursor.lastrowid), f"创建活动《{title}》", g.user["id"])
     get_db().commit()
@@ -4010,6 +4481,52 @@ def save_monthly_award():
         award_id = cursor.lastrowid
     notify(work["author_id"], f"作品《{work['title']}》入选 {month} 月度优秀。", "award", f"#/work/w{work_id}")
     audit("月度评选", "monthly_award", str(award_id), f"{month} 入选《{work['title']}》", g.user["id"])
+    get_db().commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/featured-picks")
+@require_admin
+def save_featured_pick():
+    payload = request_json()
+    work_id = parse_numeric_id(payload.get("workId"))
+    reason = clean_text(payload.get("reason"), 300)
+    if not work_id:
+        return json_error("作品无效", 400)
+    work = get_db().execute(
+        "SELECT * FROM works WHERE id = ? AND status = 'published' AND is_public = 1 AND visibility = 'PUBLIC'",
+        (work_id,),
+    ).fetchone()
+    if not work:
+        return json_error("只有公开作品可以入选芳菲之选", 400)
+    db = get_db()
+    existing = db.execute("SELECT 1 FROM featured_picks WHERE work_id = ?", (work_id,)).fetchone()
+    if existing:
+        db.execute(
+            "UPDATE featured_picks SET reason = ?, selected_by = ?, selected_at = ? WHERE work_id = ?",
+            (reason, g.user["id"], now_ms(), work_id),
+        )
+        action = "更新芳菲之选"
+    else:
+        db.execute(
+            "INSERT INTO featured_picks (work_id, reason, selected_by, selected_at) VALUES (?, ?, ?, ?)",
+            (work_id, reason, g.user["id"], now_ms()),
+        )
+        action = "入选芳菲之选"
+    notify(work["author_id"], f"作品《{work['title']}》入选芳菲之选。", "award", f"#/work/w{work_id}")
+    audit(action, "featured_pick", str(work_id), f"{action}《{work['title']}》", g.user["id"])
+    db.commit()
+    return json_ok(bootstrap_payload())
+
+
+@app.post("/api/admin/featured-picks/<int:work_id>/revoke")
+@require_admin
+def revoke_featured_pick(work_id: int):
+    row = get_db().execute("SELECT * FROM featured_picks WHERE work_id = ?", (work_id,)).fetchone()
+    if not row:
+        return json_error("芳菲之选记录不存在", 404)
+    get_db().execute("DELETE FROM featured_picks WHERE work_id = ?", (work_id,))
+    audit("撤销芳菲之选", "featured_pick", str(work_id), "撤销芳菲之选", g.user["id"])
     get_db().commit()
     return json_ok(bootstrap_payload())
 

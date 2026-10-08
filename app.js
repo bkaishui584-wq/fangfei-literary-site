@@ -2,6 +2,7 @@
   "use strict";
 
   const categories = ["全部", "小说", "诗歌", "散文", "随笔", "剧本", "科幻", "杂文", "其他"];
+  const STYLE_TAGS = ["青春", "校园", "治愈", "奇幻", "悬疑", "科幻", "爱情", "现实", "哲思", "其他"];
   const serialStatusLabels = { ONGOING: "连载中", COMPLETED: "已完结", HIATUS: "暂停更新" };
   const chapterStatusLabels = { DRAFT: "草稿", PENDING_REVIEW: "等待人工复核", PUBLISHED: "已发布", REJECTED: "未通过" };
   const THEMES = {
@@ -15,7 +16,7 @@
   const THEME_KEY = "fangfei_theme_v1";
   const PUBLIC_CACHE_KEY = "fangfei_public_cache_v1";
   const DEFAULT_RANKING_WEIGHTS = Object.freeze({ views: 1, likes: 8, favorites: 10, comments: 4 });
-  const DATA_VERSION = 13;
+  const DATA_VERSION = 14;
   const MAX_WORK_BODY_CHARS = 20000;
   const READER_SETTINGS_KEY = "fangfei_reader_settings_v1";
   const READER_SIZES = { small: "16px", medium: "18px", large: "21px" };
@@ -38,6 +39,9 @@
     schemaVersion: DATA_VERSION,
     currentUser: { id: "", name: "访客", role: "guest" },
     followed: [],
+    followers: [],
+    followerUsers: [],
+    followingUsers: [],
     followedWorks: [],
     blocked: [],
     blockedUsers: [],
@@ -57,6 +61,8 @@
     messageSettings: { allowStrangers: true, recallMinutes: 2, notifications: true },
     monthlyPicks: [],
     monthlyAwards: [],
+    featuredPicks: [],
+    adminOverview: {},
     conversations: [],
     users: [],
     adminRoles: [],
@@ -77,11 +83,21 @@
   let route = location.hash.replace(/^#\/?/, "") || "home";
   let workFilter = "全部";
   let searchTerm = "";
+  let globalSearchTerm = "";
+  let workTagFilter = "";
+  let workAuthorFilter = "";
+  let workFormatFilter = "all";
+  let workSerialFilter = "all";
+  let workPeriodFilter = "all";
   let activeConversation = state.conversations[0]?.id || null;
   let replyTo = null;
   let adminTab = "概览";
-  let profileTab = "works";
+  let profileTab = "workbench";
+  let notificationFilter = "all";
+  let workbenchFilter = "all";
   let chapterReplyTo = "";
+  let workReplyTo = "";
+  let workCommentSort = "latest";
   let publishTopicId = "";
   let mobileChatOpen = false;
   let rankingPeriod = "month";
@@ -92,6 +108,7 @@
   let announcementShown = false;
   let publishAutoSaveTimer = null;
   let readingScrollHandler = null;
+  let readerScrollHandler = null;
   let chapterEditorId = "";
 
   const app = document.querySelector("#app");
@@ -158,7 +175,7 @@
     }
     return payload;
   };
-  const PUBLIC_STATE_KEYS = ["schemaVersion", "works", "authors", "activities", "announcements", "bookShares", "monthlyPicks", "monthlyAwards", "topics", "rankings", "rankingWeights"];
+  const PUBLIC_STATE_KEYS = ["schemaVersion", "works", "authors", "activities", "announcements", "bookShares", "monthlyPicks", "monthlyAwards", "featuredPicks", "topics", "rankings", "rankingWeights"];
   const cachePublicState = () => {
     try {
       const snapshot = {};
@@ -233,6 +250,8 @@
     return `<span class="${className}">${escapeHtml(String(source || user?.name || "芳").slice(0, 2))}</span>`;
   };
   const topicById = (id) => state.topics.find((topic) => topic.id === id) || null;
+  const featuredPickById = (workId) => (state.featuredPicks || []).find((item) => item.workId === workId) || null;
+  const isFeaturedWork = (work) => Boolean(work && (state.monthlyPicks.includes(work.id) || featuredPickById(work.id)));
   const bookShareById = (id) => state.bookShares.find((item) => item.id === id) || null;
   const topicStatusLabel = (status) => ({ DRAFT: "草稿", PUBLISHED: "进行中", ENDED: "已结束", ARCHIVED: "已归档" }[status] || status || "未知");
   const topicRemaining = (topic) => {
@@ -291,6 +310,11 @@
   const readingMinutes = (work) => Math.max(1, Math.round((work.body || []).join("").length / 420));
   const wordCount = (work) => (work.body || []).join("").replace(/\s/g, "").length;
   const workTags = (work) => Array.isArray(work.tags) ? work.tags.filter(Boolean) : [];
+  const asTime = (value) => { const n = Number(value); if (Number.isFinite(n) && n > 0) return n; const t = new Date(String(value || "")).getTime(); return Number.isFinite(t) ? t : 0; };
+  const WORK_FILTER_KEY = "fangfei-work-filters-v1";
+  const saveWorkFilters = () => { try { localStorage.setItem(WORK_FILTER_KEY, JSON.stringify({ searchTerm, workFilter, workSort, workTagFilter, workAuthorFilter, workFormatFilter, workSerialFilter, workPeriodFilter })); } catch {} };
+  const loadWorkFilters = () => { try { const saved = JSON.parse(localStorage.getItem(WORK_FILTER_KEY) || "null"); if (!saved) return; searchTerm = String(saved.searchTerm || ""); workFilter = saved.workFilter || "全部"; workSort = saved.workSort || "latest"; workTagFilter = saved.workTagFilter || ""; workAuthorFilter = saved.workAuthorFilter || ""; workFormatFilter = saved.workFormatFilter || "all"; workSerialFilter = saved.workSerialFilter || "all"; workPeriodFilter = saved.workPeriodFilter || "all"; } catch {} };
+  loadWorkFilters();
   const authorKey = (name) => `writer-${Array.from(String(name || "作者")).map((char) => char.codePointAt(0).toString(36)).join("")}`;
   const formatDate = (value) => {
     const date = new Date(value);
@@ -462,8 +486,9 @@
     const favorited = state.favoritedWorks.map(workById).filter(Boolean);
     const comments = state.works.flatMap((work) => (work.comments || []).map((comment) => ({ ...comment, workTitle: work.title }))).filter((comment) => comment.userId === currentUserId());
     const author = state.authors.find((item) => item.id === currentUserId());
-    const tabs = [["works", "我的作品"], ["shelf", "我的书架"], ["favorites", "我的收藏"], ["likes", "我的点赞"], ["comments", "我的评论"], ["awards", "我的获奖"], ["activities", "我的活动"], ["shares", "我的分享"], ["settings", "账户设置"]];
+    const tabs = [["workbench", "作者工作台"], ["works", "我的作品"], ["shelf", "我的书架"], ["favorites", "我的收藏"], ["likes", "我的点赞"], ["comments", "我的评论"], ["awards", "我的获奖"], ["activities", "我的活动"], ["shares", "我的分享"], ["network", "关注与粉丝"], ["settings", "账户设置"]];
     let content = "";
+    if (profileTab === "workbench") content = renderWorkbench(works, awards, author);
     if (profileTab === "works") {
       const statusItems = [["published", "已发布"], ["pending_agent", "Agent 审核中"], ["pending_review", "等待人工复核"], ["draft", "草稿"], ["rejected", "未通过"], ["private", "私密投稿"]];
       const statusCards = statusItems.map(([status, label]) => {
@@ -485,10 +510,64 @@
     if (profileTab === "awards") content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">文学社荣誉</p><h2 class="section-title">我的获奖</h2></div></div>${awards.length ? `<ul class="admin-list">${awards.map((award) => `<li class="admin-row"><span><strong>${escapeHtml(workById(award.workId)?.title || "作品")}</strong><small class="admin-note">${escapeHtml(award.month)} · ${escapeHtml(award.category || "综合")} · 由 ${escapeHtml(award.selectedByName || "编辑部")} 评选</small></span><button class="button button-small" type="button" data-work="${award.workId}">阅读</button></li>`).join("")}</ul>` : '<div class="empty compact-empty">暂无获奖记录。</div>'}</section>`;
     if (profileTab === "activities") content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">参与记录</p><h2 class="section-title">我的活动</h2></div></div><div class="empty compact-empty">当前系统暂未保存活动报名关系，暂无可展示记录。</div></section>`;
     if (profileTab === "shares") { const mine = state.bookShares.filter((item) => item.mine); content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">阅读推荐</p><h2 class="section-title">我的分享</h2></div><button class="button button-small button-primary" type="button" data-book-share-new>发布分享</button></div>${mine.length ? `<div class="book-share-grid">${mine.map(bookShareCard).join("")}</div>` : '<div class="empty compact-empty">暂无书友分享。</div>'}</section>`; }
-    if (profileTab === "settings") content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">账号与偏好</p><h2 class="section-title">账户设置</h2></div></div><div class="settings-grid"><button class="setting-card" type="button" data-profile-edit><strong>个人资料</strong><small>笔名、头像、简介、背景图和文学偏好</small></button><button class="setting-card" type="button" data-open-settings><strong>主题设置</strong><small>保留现有六套主题并即时切换</small></button><button class="setting-card" type="button" data-profile-privacy><strong>隐私与私信</strong><small>陌生人私信、拉黑名单和撤回时间</small></button><button class="setting-card" type="button" data-profile-notifications><strong>通知设置</strong><small>控制站内通知与未读提醒</small></button><button class="setting-card" type="button" data-profile-password><strong>安全设置</strong><small>修改登录密码</small></button><button class="setting-card" type="button" data-route="messages"><strong>我的私信</strong><small>查看会话和未读消息</small></button><button class="setting-card is-danger" type="button" data-logout><strong>退出登录</strong><small>结束当前浏览器会话</small></button></div></section>`;
-    app.innerHTML = `<div class="page profile-page"><header class="profile-hero" ${user.coverTheme && THEMES[user.coverTheme] ? `style="--profile-cover:url('${THEMES[user.coverTheme].image}')"` : ""}><div class="profile-hero-main">${avatarHtml(user, "avatar profile-avatar")}<div><p class="eyebrow">个人中心</p><h1>${escapeHtml(user.name)}</h1><p>${escapeHtml(user.bio || "还没有写下个人简介。")}</p><small>加入于 ${escapeHtml(user.joinedAt || "未知时间")}</small></div></div><div class="profile-stats"><span><strong>${published.length}</strong>已发布作品</span><span><strong>${awards.length}</strong>获奖</span><span><strong>${favorited.length}</strong>收藏</span><span><strong>${Number(author?.followerCount) || 0}</strong>关注者</span></div></header><nav class="profile-tabs">${tabs.map(([id, label]) => `<button class="${profileTab === id ? "is-active" : ""}" type="button" data-profile-tab="${id}">${label}</button>`).join("")}</nav>${content}</div>`;
+    if (profileTab === "network") {
+      const following = Array.isArray(state.followingUsers) ? state.followingUsers : [];
+      const followers = Array.isArray(state.followerUsers) ? state.followerUsers : [];
+      const people = (items, emptyText) => items.length ? `<ul class="admin-list">${items.map((person) => `<li class="admin-row"><span><strong>${escapeHtml(person.name || "匿名用户")}</strong><small class="admin-note">${escapeHtml(person.bio || "还没有写下个人简介。")}</small></span><div class="admin-actions">${authorById(person.id) ? `<button class="button button-small" type="button" data-author="${person.id}">查看主页</button>` : ""}<button class="button button-small button-primary" type="button" data-message-author="${person.id}">私信</button></div></li>`).join("")}</ul>` : `<div class="empty compact-empty">${emptyText}</div>`;
+      content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">社交关系</p><h2 class="section-title">关注与粉丝</h2></div></div><div class="section-head"><div><h3 class="section-title">我的关注</h3></div><span class="muted">${following.length} 位</span></div>${people(following, "还没有关注作者。")}<div class="section-head"><div><h3 class="section-title">我的粉丝</h3></div><span class="muted">${followers.length} 位</span></div>${people(followers, "还没有粉丝。")}</section>`;
+    }
+    if (profileTab === "settings") content = `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">账号与偏好</p><h2 class="section-title">账户设置</h2></div></div><div class="settings-grid"><button class="setting-card" type="button" data-profile-edit><strong>个人资料</strong><small>笔名、头像、简介、背景图和文学偏好</small></button><button class="setting-card" type="button" data-profile-featured><strong>作者代表作</strong><small>选择 1～3 篇公开作品，优先展示在作者主页</small></button><button class="setting-card" type="button" data-open-settings><strong>主题设置</strong><small>保留现有六套主题并即时切换</small></button><button class="setting-card" type="button" data-profile-privacy><strong>隐私与私信</strong><small>陌生人私信、拉黑名单和撤回时间</small></button><button class="setting-card" type="button" data-profile-notifications><strong>通知设置</strong><small>控制站内通知与未读提醒</small></button><button class="setting-card" type="button" data-profile-password><strong>安全设置</strong><small>修改登录密码</small></button><button class="setting-card" type="button" data-route="messages"><strong>我的私信</strong><small>查看会话和未读消息</small></button><button class="setting-card is-danger" type="button" data-logout><strong>退出登录</strong><small>结束当前浏览器会话</small></button></div></section>`;
+    app.innerHTML = `<div class="page profile-page"><header class="profile-hero" ${user.coverTheme && THEMES[user.coverTheme] ? `style="--profile-cover:url('${THEMES[user.coverTheme].image}')"` : ""}><div class="profile-hero-main">${avatarHtml(user, "avatar profile-avatar")}<div><p class="eyebrow">个人中心</p><h1>${escapeHtml(user.name)}</h1><p>${escapeHtml(user.bio || "还没有写下个人简介。")}</p><small>加入于 ${escapeHtml(user.joinedAt || "未知时间")}</small></div></div><div class="profile-stats"><span><strong>${published.length}</strong>已发布作品</span><span><strong>${awards.length}</strong>获奖</span><span><strong>${favorited.length}</strong>收藏</span><span><strong>${state.followers?.length || Number(author?.followerCount) || 0}</strong>关注者</span></div></header><nav class="profile-tabs">${tabs.map(([id, label]) => `<button class="${profileTab === id ? "is-active" : ""}" type="button" data-profile-tab="${id}">${label}</button>`).join("")}</nav>${content}</div>`;
   }
 
+
+  function workbenchWorkList(works) {
+    if (!works.length) return '<div class="empty compact-empty">这个分类下还没有作品。</div>';
+    const editable = new Set(["draft", "rejected", "pending", "pending_agent", "pending_review", "published"]);
+    return `<div class="profile-work-list">${works.map((work) => `<article class="profile-work-row"><div><span class="work-category">${escapeHtml(work.category || "未分类")}${isSerialWork(work) ? " · 连载" : " · 单篇"}</span><h3>${escapeHtml(work.title)}</h3><small>${escapeHtml(work.excerpt || "")}</small><div class="work-timeline"><span>阅读 ${Number(work.views) || 0}</span><span>收藏 ${Number(work.favorites) || 0}</span><span>点赞 ${Number(work.likes) || 0}</span><span>评论 ${Number(work.commentsCount) || 0}</span><span>追更 ${Number(work.followCount) || 0}</span></div><div class="work-timeline"><span>投稿 ${escapeHtml(formatDate(work.createdAt))}</span>${work.updatedAt ? `<span>更新 ${escapeHtml(formatDate(work.updatedAt))}</span>` : ""}${work.reviewNote ? `<span>意见：${escapeHtml(work.reviewNote)}</span>` : ""}</div></div><div class="profile-work-actions"><span class="status-pill">${escapeHtml(statusLabel(work.status))}</span>${work.status === "hidden" ? "" : `<button class="button button-small" type="button" data-work="${work.id}">查看</button>`}${isSerialWork(work) && work.status !== "hidden" ? `<button class="button button-small" type="button" data-manage-chapters="${work.id}">章节管理</button>` : ""}${editable.has(work.status) ? `<button class="button button-small button-primary" type="button" data-edit-work="${work.id}">${work.status === "published" ? "修改后重审" : "编辑"}</button>` : ""}${work.status !== "hidden" ? `<button class="button button-small button-danger" type="button" data-work-delete="${work.id}">${work.status === "published" ? "撤下" : "删除"}</button>` : ""}</div></article>`).join("")}</div>`;
+  }
+
+  function renderWorkbench(works, awards, author) {
+    const normalWorks = works.filter((work) => !isSerialWork(work));
+    const serialWorks = works.filter(isSerialWork);
+    const drafts = works.filter((work) => work.status === "draft");
+    const trash = works.filter((work) => work.status === "hidden");
+    const pending = works.filter((work) => ["pending", "pending_agent", "pending_review"].includes(work.status));
+    const approved = works.filter(isPublishedWork);
+    const rejected = works.filter((work) => work.status === "rejected");
+    const totals = works.reduce((acc, work) => {
+      acc.views += Number(work.views) || 0;
+      acc.favorites += Number(work.favorites) || 0;
+      acc.likes += Number(work.likes) || 0;
+      acc.comments += Number(work.commentsCount) || 0;
+      acc.follows += Number(work.followCount) || 0;
+      return acc;
+    }, { views: 0, favorites: 0, likes: 0, comments: 0, follows: 0 });
+    const chapterToWork = new Map();
+    const chapterComments = state.works.flatMap((work) => (work.chapters || []).flatMap((chapter) => {
+      chapterToWork.set(chapter.id, work.id);
+      return (chapter.comments || []).map((comment) => ({ ...comment, workTitle: work.title, chapterTitle: chapter.title }));
+    }));
+    const myChapterComments = chapterComments.filter((comment) => comment.userId === currentUserId());
+    const ownedWorkIds = new Set(works.map((work) => work.id));
+    const receivedChapterComments = chapterComments.filter((comment) => ownedWorkIds.has(chapterToWork.get(comment.chapterId)));
+    const filters = [["all", "全部作品", works.length], ["serial", "连载作品", serialWorks.length], ["single", "普通作品", normalWorks.length], ["draft", "草稿箱", drafts.length], ["trash", "回收站", trash.length]];
+    const selected = { all: works, serial: serialWorks, single: normalWorks, draft: drafts, trash }[workbenchFilter] || works;
+    const summary = `<div class="profile-status-summary workbench-summary"><span><strong>${works.length}</strong>全部作品</span><span><strong>${pending.length}</strong>审核中</span><span><strong>${approved.length}</strong>已通过</span><span><strong>${rejected.length}</strong>已退回</span><span><strong>${drafts.length}</strong>草稿</span></div>`;
+    const filterRow = `<div class="workbench-filters">${filters.map(([id, label, count]) => `<button class="filter-chip ${workbenchFilter === id ? "is-active" : ""}" type="button" data-workbench-filter="${id}">${label} ${count}</button>`).join("")}</div>`;
+    return `<section class="profile-section"><div class="section-head"><div><p class="eyebrow">创作与互动</p><h2 class="section-title">作者工作台</h2></div><button class="button button-small button-primary" type="button" data-publish>新建投稿</button></div>${summary}<div class="section-head"><div><h3 class="section-title">作品管理</h3></div></div>${filterRow}${workbenchWorkList(selected)}<div class="section-head"><div><h3 class="section-title">投稿管理</h3></div></div><div class="profile-status-summary"><span><strong>${pending.length}</strong>审核中</span><span><strong>${approved.length}</strong>已通过</span><span><strong>${rejected.length}</strong>已退回</span></div><div class="section-head"><div><h3 class="section-title">创作数据</h3></div><span class="muted">全部作品累计</span></div><div class="profile-status-summary"><span><strong>${totals.views}</strong>阅读</span><span><strong>${totals.favorites}</strong>收藏</span><span><strong>${totals.likes}</strong>点赞</span><span><strong>${totals.comments}</strong>作品评论</span><span><strong>${totals.follows}</strong>追更</span></div><div class="section-head"><div><h3 class="section-title">互动</h3></div></div><div class="profile-status-summary"><span><strong>${receivedChapterComments.length}</strong>章节评论</span><span><strong>${myChapterComments.length}</strong>我的章评</span><span><strong>${awards.length}</strong>获奖</span><span><strong>${state.followers?.length || Number(author?.followerCount) || 0}</strong>关注者</span></div><p class="muted">作品评论与章评明细请到「我的评论」，读者互动会在后续通知中心统一展示。</p></section>`;
+  }
+
+  function openFeaturedWorksEditor() {
+    if (!state.currentUser?.id) return;
+    const minePublished = myWorks().filter((work) => work.status === "published" && work.isPublic !== false && work.visibility !== "PRIVATE");
+    const current = Array.isArray(state.currentUser.featuredWorks) ? state.currentUser.featuredWorks : [];
+    openModal("设置作者代表作", `<p class="muted">最多选择 3 篇公开作品，作者主页会优先展示。</p>${minePublished.length ? `<form id="featured-works-form"><div class="field"><label>选择作品</label>${minePublished.map((work) => `<label class="setting-row"><span><strong>${escapeHtml(work.title)}</strong><small>${escapeHtml(work.category || "未分类")}</small></span><input type="checkbox" name="workIds" value="${work.id}" ${current.includes(work.id) ? "checked" : ""}></label>`).join("")}</div></form>` : '<div class="empty compact-empty">你还没有公开作品可供选择。</div>'}`, minePublished.length ? '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-primary" type="button" id="featured-works-save">保存代表作</button></div>' : '<div class="modal-actions"><button class="button" type="button" data-close-modal>关闭</button></div>');
+    document.querySelector("#featured-works-save")?.addEventListener("click", async () => {
+      const ids = Array.from(document.querySelectorAll('#featured-works-form [name="workIds"]:checked')).map((input) => input.value).slice(0, 3);
+      await performAction("/api/profile/featured-works", { workIds: ids }, "代表作已保存", () => closeModal());
+    });
+  }
 
   function openProfileEditor() {
     const user = state.currentUser;
@@ -678,7 +757,7 @@
   }
 
   function workCard(work) {
-    const featured = state.monthlyPicks.includes(work.id);
+    const featured = isFeaturedWork(work);
     const tags = workTags(work);
     const published = formatDate(work.createdAt || work.publishedAt);
     const likes = Number(work.likes) || 0;
@@ -686,7 +765,7 @@
     const favorites = Number(work.favorites) || 0;
     const comments = Array.isArray(work.comments) ? work.comments.length : 0;
     return `<article class="work-card ${featured ? "is-featured" : ""}">
-      <div class="work-card-top"><span class="work-category">${escapeHtml(work.category || "未分类")}</span><span class="work-flags">${isSerialWork(work) ? `<span class="work-flag">连载 · ${escapeHtml(serialStatusLabel(work.serialStatus))}</span>` : ""}${work.visibility === "PRIVATE" ? '<span class="work-flag">私密投稿</span>' : work.status !== "published" ? `<span class="work-flag">${escapeHtml(statusLabel(work.status))}</span>` : featured ? '<span class="work-flag">本月优秀</span>' : ""}</span></div>
+      <div class="work-card-top"><span class="work-category">${escapeHtml(work.category || "未分类")}</span><span class="work-flags">${isSerialWork(work) ? `<span class="work-flag">连载 · ${escapeHtml(serialStatusLabel(work.serialStatus))}</span>` : ""}${work.visibility === "PRIVATE" ? '<span class="work-flag">私密投稿</span>' : work.status !== "published" ? `<span class="work-flag">${escapeHtml(statusLabel(work.status))}</span>` : featured ? `<span class="work-flag">${featuredPickById(work.id) ? "🌸 芳菲之选" : "本月优秀"}</span>` : ""}</span></div>
       <button class="work-card-title work-title-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button>
       <p class="work-excerpt">${escapeHtml(work.excerpt || (work.body || []).join("").slice(0, 110))}</p>
       ${tags.length ? `<div class="tag-row">${tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
@@ -744,7 +823,21 @@
   }
 
   function renderHome() {
-    const latest = publicWorks().sort((a, b) => Number(b.createdAt || b.publishedAt || 0) - Number(a.createdAt || a.publishedAt || 0));
+    const publicList = publicWorks();
+    const latest = publicList.slice().sort((a, b) => asTime(b.createdAt || b.publishedAt) - asTime(a.createdAt || a.publishedAt));
+    const seedDate = new Date().toISOString().slice(0, 10);
+    const seed = Array.from(seedDate).reduce((total, char) => total + char.charCodeAt(0), 0);
+    const featured = latest.length ? latest[seed % latest.length] : null;
+    const quoteWork = latest.length ? (latest.find((work) => String(work.quoteText || "").trim()) || latest[(seed + 3) % latest.length]) : null;
+    const snippet = (work, maxLength) => {
+      if (!work) return "";
+      const candidates = [work.excerpt, ...(Array.isArray(work.body) ? work.body : [])];
+      const text = String(candidates.find((value) => String(value || "").trim()) || "").trim();
+      return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+    };
+    const quote = String(quoteWork?.quoteText || "").trim() || snippet(quoteWork, 56);
+    const serialUpdates = latest.filter(isSerialWork).sort((a, b) => asTime(b.updatedAt || b.publishedAt || b.createdAt) - asTime(a.updatedAt || a.publishedAt || a.createdAt)).slice(0, 3);
+    const topic = state.topics.find((item) => item.status === "PUBLISHED") || null;
     const latestAwardMonth = state.monthlyAwards[0]?.month || "";
     const monthly = (state.monthlyAwards.length
       ? state.monthlyAwards.filter((award) => award.month === latestAwardMonth).map((award) => workById(award.workId))
@@ -753,7 +846,24 @@
       const works = worksByAuthor(author.name);
       return { ...author, works, likes: works.reduce((sum, work) => sum + (Number(work.likes) || 0), 0) };
     }).filter((author) => author.works.length).sort((a, b) => b.likes - a.likes || b.works.length - a.works.length).slice(0, 3);
-    const announcement = publishedAnnouncement();
+    const announcements = state.announcements.slice(0, 3);
+    const featuredCard = featured ? `<article class="feature-work">
+      <span class="work-category">今日推荐 · ${escapeHtml(featured.category || "文学作品")}</span>
+      <h3><button class="link-button" type="button" data-work="${featured.id}">${escapeHtml(featured.title)}</button></h3>
+      <p>${escapeHtml(snippet(featured, 180) || "暂无简介。")}</p>
+      <div class="feature-work-meta">
+        <span><button class="link-button" type="button" data-author="${featured.authorId || authorIdByName(featured.author)}">${escapeHtml(featured.author || "匿名作者")}</button> · ${escapeHtml(formatDate(featured.createdAt || featured.publishedAt) || "发布时间未记录")} · ${Number(featured.views) || 0} 阅读 · ${Number(featured.likes) || 0} 点赞 · ${Number(featured.favorites) || 0} 收藏</span>
+        <button class="button button-primary" type="button" data-work="${featured.id}">开始阅读</button>
+      </div>
+    </article>` : '<div class="empty compact-empty">这里还没有公开作品。</div>';
+    const quoteCard = `<article class="feature-mini">
+      <div><span class="work-category">今日一句</span><h3>${quote ? `“${escapeHtml(quote)}”` : "暂无可摘录内容"}</h3><p>${quoteWork ? `摘自《${escapeHtml(quoteWork.title)}》· ${escapeHtml(quoteWork.author || "匿名作者")}` : "公开作品出现后，这里会从真实正文中选取一句。"}</p></div>
+      ${quoteWork ? `<button class="button button-small" type="button" data-work="${quoteWork.id}">阅读</button>` : ""}
+    </article>`;
+    const topicCard = topic ? `<article class="feature-mini">
+      <div><span class="work-category">本周主题</span><h3>${escapeHtml(topic.title || "未命名话题")}</h3><p>${escapeHtml(topic.description || "暂无话题说明。")}</p><p class="muted">${escapeHtml(topicRemaining(topic))} · ${Number(topic.submissions) || 0} 篇投稿</p></div>
+      <button class="button button-small" type="button" data-route="topic/${topic.id}">参与</button>
+    </article>` : `<article class="feature-mini"><div><span class="work-category">本周主题</span><h3>本周暂无投稿话题</h3><p>管理员发布新话题后，会在这里显示真实投稿信息。</p></div><button class="button button-small" type="button" data-route="topics">查看话题</button></article>`;
     app.innerHTML = `<div class="page">
       <section class="hero home-hero">
         <div class="hero-copy">
@@ -766,13 +876,28 @@
       </section>
 
       <section class="section">
-        <div class="section-head"><div><p class="eyebrow">编辑推荐</p><h2 class="section-title">本月优秀</h2></div><button class="section-link" type="button" data-route="monthly">查看月度页面</button></div>
-        ${monthly.length ? `<div class="monthly-ribbon">${monthly.map((work, index) => `<article><span>${String(index + 1).padStart(2, "0")}</span><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><small>${escapeHtml(work.author)} · ${Number(work.likes) || 0} 点赞</small></article>`).join("")}</div>` : '<div class="empty compact-empty">本月暂无优秀作品。</div>'}
+        <div class="section-head"><div><p class="eyebrow">今日阅读</p><h2 class="section-title">今日推荐</h2></div><button class="section-link" type="button" data-route="works">全部作品</button></div>
+        ${latest.length ? `<div class="home-feature-grid">${featuredCard}<div class="feature-side">${quoteCard}${topicCard}</div></div>` : '<div class="empty compact-empty">还没有公开作品。<button class="link-button" type="button" data-publish>投稿第一篇作品</button></div>'}
       </section>
 
       <section class="section">
         <div class="section-head"><div><p class="eyebrow">刚刚更新</p><h2 class="section-title">最新作品</h2></div><button class="section-link" type="button" data-route="works">查看全部作品</button></div>
         ${latest.length ? `<div class="work-grid">${latest.slice(0, 6).map(workCard).join("")}</div>` : '<div class="empty compact-empty">还没有公开作品。<button class="link-button" type="button" data-publish>投稿第一篇作品</button></div>'}
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><p class="eyebrow">本月优秀</p><h2 class="section-title">芳菲之选</h2></div><button class="section-link" type="button" data-route="monthly">查看月度页面</button></div>
+        ${monthly.length ? `<div class="monthly-ribbon">${monthly.map((work, index) => `<article><span>${String(index + 1).padStart(2, "0")}</span><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><small>${escapeHtml(work.author)} · ${Number(work.likes) || 0} 点赞</small></article>`).join("")}</div>` : '<div class="empty compact-empty">本月暂无优秀作品。</div>'}
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><p class="eyebrow">持续写作</p><h2 class="section-title">连载更新</h2></div><button class="section-link" type="button" data-route="works">查看连载作品</button></div>
+        ${serialUpdates.length ? `<div class="society-feed">${serialUpdates.map((work) => `<article><time>${escapeHtml(formatRelativeTime(work.updatedAt || work.publishedAt || work.createdAt))}</time><div><h3><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button></h3><p>${escapeHtml(work.latestChapter ? `更新至 ${work.latestChapter}` : `${Number(work.chapterCount) || 0} 章`)} · ${escapeHtml(work.author || "匿名作者")}</p></div></article>`).join("")}</div>` : '<div class="empty compact-empty">暂无连载作品更新。</div>'}
+      </section>
+
+      <section class="section">
+        <div class="section-head"><div><p class="eyebrow">文学社公告</p><h2 class="section-title">芳菲动态</h2></div><button class="section-link" type="button" data-announcement-history>公告历史</button></div>
+        ${announcements.length ? `<div class="society-feed">${announcements.map((item) => `<article><time>${escapeHtml(formatDate(item.at))}</time><div><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.content).replace(/\n/g, "<br>")}</p></div></article>`).join("")}</div>` : '<div class="empty compact-empty">暂无文学社公告。</div>'}
       </section>
 
       <section class="section">
@@ -790,35 +915,60 @@
           ${state.activities.length ? `<div class="activity-grid">${state.activities.slice(0, 4).map(activityCard).join("")}</div>` : '<div class="empty compact-empty">暂无已发布活动。</div>'}
         </section>
       </div>
-
-      <section class="section">
-        <div class="section-head"><div><p class="eyebrow">文学社公告</p><h2 class="section-title">芳菲动态</h2></div><button class="section-link" type="button" data-announcement-history>公告历史</button></div>
-        ${announcement ? `<article class="home-announcement"><div><span class="work-category">${announcement.pinned ? "置顶公告" : "公告"}</span><h3>${escapeHtml(announcement.title)}</h3><p class="announcement-text">${escapeHtml(announcement.content).replace(/\n/g, "<br>")}</p></div><time>${escapeHtml(announcement.at || "")}</time></article>` : '<div class="empty compact-empty">暂无文学社公告。</div>'}
-      </section>
     </div>`;
+  }
+  function clearWorkFilters() {
+    searchTerm = ""; workFilter = "全部"; workTagFilter = ""; workAuthorFilter = ""; workFormatFilter = "all"; workSerialFilter = "all"; workPeriodFilter = "all";
+    saveWorkFilters();
+    renderWorks();
   }
 
   function renderWorks() {
     const term = searchTerm.trim().toLowerCase();
+    const allTags = Array.from(new Set(publicWorks().flatMap(workTags))).sort((a, b) => a.localeCompare(b));
+    const authorNames = Array.from(new Set(publicWorks().map((work) => work.author).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    const now = Date.now();
+    const periodCut = { month: now - 30 * 86400000, quarter: now - 92 * 86400000, year: now - 366 * 86400000 };
     const works = publicWorks().filter((work) => {
       const tags = workTags(work).join(" ");
-      const text = `${work.title}${work.author}${work.excerpt}${tags}${(work.body || []).join("")}`.toLowerCase();
-      return (workFilter === "全部" || work.category === workFilter) && (!term || text.includes(term));
+      const text = `${work.title}${work.author}${work.excerpt}${work.category}${tags}${(work.body || []).join("")}`.toLowerCase();
+      if (term && !text.includes(term)) return false;
+      if (workFilter !== "全部" && work.category !== workFilter) return false;
+      if (workTagFilter && !workTags(work).some((tag) => tag.toLowerCase() === workTagFilter.toLowerCase())) return false;
+      if (workAuthorFilter && work.author !== workAuthorFilter) return false;
+      if (workFormatFilter !== "all" && (work.workFormat || "single") !== workFormatFilter) return false;
+      if (workSerialFilter !== "all") {
+        if (workSerialFilter === "single") { if (isSerialWork(work)) return false; }
+        else if (!isSerialWork(work) || (work.serialStatus || "ONGOING") !== workSerialFilter) return false;
+      }
+      if (periodCut[workPeriodFilter] && asTime(work.publishedAt || work.createdAt) < periodCut[workPeriodFilter]) return false;
+      return true;
     }).sort((a, b) => {
       if (workSort === "popular") return Number(b.views || 0) - Number(a.views || 0);
+      if (workSort === "likes") return Number(b.likes || 0) - Number(a.likes || 0);
       if (workSort === "favorites") return Number(b.favorites || 0) - Number(a.favorites || 0);
       if (workSort === "comments") return Number(b.commentsCount || 0) - Number(a.commentsCount || 0);
-      return Number(b.createdAt || b.publishedAt || 0) - Number(a.createdAt || a.publishedAt || 0);
+      if (workSort === "updated") return asTime(b.updatedAt) - asTime(a.updatedAt);
+      return asTime(b.publishedAt || b.createdAt) - asTime(a.publishedAt || a.createdAt);
     });
+    const hasFilter = term || workFilter !== "全部" || workTagFilter || workAuthorFilter || workFormatFilter !== "all" || workSerialFilter !== "all" || workPeriodFilter !== "all";
     app.innerHTML = `<div class="page">
       <header class="page-head"><div><p class="eyebrow">作品阅览室</p><h1 class="page-title">作品</h1></div><p class="page-note">按体裁浏览，或搜索标题、作者、标签和正文摘录。</p></header>
-      <div class="toolbar"><label class="search-box"><span aria-hidden="true">⌕</span><input id="work-search" type="search" placeholder="搜索作品" value="${escapeHtml(searchTerm)}"></label><select class="select work-sort" id="work-sort" aria-label="作品排序"><option value="latest" ${workSort === "latest" ? "selected" : ""}>最新发布</option><option value="popular" ${workSort === "popular" ? "selected" : ""}>最多阅读</option><option value="favorites" ${workSort === "favorites" ? "selected" : ""}>最多收藏</option><option value="comments" ${workSort === "comments" ? "selected" : ""}>最多评论</option></select>${categories.map((category) => `<button class="filter-chip ${workFilter === category ? "is-active" : ""}" type="button" data-filter="${category}">${category}</button>`).join("")}</div>
-      ${works.length ? `<div class="work-grid">${works.map(workCard).join("")}</div>` : `<div class="empty">没有找到匹配的作品，换个关键词试试。</div>`}
+      <div class="discover-links"><button class="button button-small" type="button" data-random-work="all">🎲 随便读读</button><button class="button button-small" type="button" data-route="start">从这里开始</button><button class="button button-small" type="button" data-route="journal">芳菲月刊</button><button class="button button-small" type="button" data-route="archive">文学社档案</button></div>
+      <div class="toolbar"><label class="search-box"><span aria-hidden="true">⌕</span><input id="work-search" type="search" placeholder="搜索作品" value="${escapeHtml(searchTerm)}"></label><select class="select work-sort" id="work-sort" aria-label="作品排序"><option value="latest" ${workSort === "latest" ? "selected" : ""}>最新发布</option><option value="updated" ${workSort === "updated" ? "selected" : ""}>最近更新</option><option value="popular" ${workSort === "popular" ? "selected" : ""}>最多阅读</option><option value="likes" ${workSort === "likes" ? "selected" : ""}>最多点赞</option><option value="favorites" ${workSort === "favorites" ? "selected" : ""}>最多收藏</option><option value="comments" ${workSort === "comments" ? "selected" : ""}>最多评论</option></select>${categories.map((category) => `<button class="filter-chip ${workFilter === category ? "is-active" : ""}" type="button" data-filter="${category}">${category}</button>`).join("")}</div>
+      <div class="toolbar work-filters"><select class="select" id="work-tag" aria-label="按标签筛选"><option value="">全部标签</option>${allTags.map((tag) => `<option value="${escapeHtml(tag)}" ${workTagFilter === tag ? "selected" : ""}>${escapeHtml(tag)}</option>`).join("")}</select><select class="select" id="work-author" aria-label="按作者筛选"><option value="">全部作者</option>${authorNames.map((name) => `<option value="${escapeHtml(name)}" ${workAuthorFilter === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select><select class="select" id="work-format" aria-label="按作品形式筛选"><option value="all" ${workFormatFilter === "all" ? "selected" : ""}>全部形式</option><option value="single" ${workFormatFilter === "single" ? "selected" : ""}>单篇</option><option value="serial" ${workFormatFilter === "serial" ? "selected" : ""}>连载</option></select><select class="select" id="work-serial" aria-label="按连载状态筛选"><option value="all" ${workSerialFilter === "all" ? "selected" : ""}>全部状态</option><option value="ONGOING" ${workSerialFilter === "ONGOING" ? "selected" : ""}>连载中</option><option value="COMPLETED" ${workSerialFilter === "COMPLETED" ? "selected" : ""}>已完结</option><option value="HIATUS" ${workSerialFilter === "HIATUS" ? "selected" : ""}>暂停更新</option><option value="single" ${workSerialFilter === "single" ? "selected" : ""}>仅单篇</option></select><select class="select" id="work-period" aria-label="按发布时间筛选"><option value="all" ${workPeriodFilter === "all" ? "selected" : ""}>全部时间</option><option value="month" ${workPeriodFilter === "month" ? "selected" : ""}>近一月</option><option value="quarter" ${workPeriodFilter === "quarter" ? "selected" : ""}>近三月</option><option value="year" ${workPeriodFilter === "year" ? "selected" : ""}>近一年</option></select>${hasFilter ? '<button class="button button-small button-quiet" type="button" data-clear-work-filters>清除筛选</button>' : ""}</div>
+      <p class="muted work-result-count">共 ${works.length} 篇作品</p>
+      ${works.length ? `<div class="work-grid">${works.map(workCard).join("")}</div>` : `<div class="empty">没有找到匹配的作品，换个关键词或清除部分筛选试试。</div>`}
     </div>`;
     const search = document.querySelector("#work-search");
-    search?.addEventListener("input", (event) => { searchTerm = event.target.value; renderWorks(); document.querySelector("#work-search")?.focus(); });
-    document.querySelector("#work-sort")?.addEventListener("change", (event) => { workSort = event.target.value; renderWorks(); });
+    search?.addEventListener("input", (event) => { searchTerm = event.target.value; saveWorkFilters(); renderWorks(); document.querySelector("#work-search")?.focus(); });
+    document.querySelector("#work-sort")?.addEventListener("change", (event) => { workSort = event.target.value; saveWorkFilters(); renderWorks(); });
+    [["#work-tag", "workTagFilter"], ["#work-author", "workAuthorFilter"], ["#work-format", "workFormatFilter"], ["#work-serial", "workSerialFilter"], ["#work-period", "workPeriodFilter"]].forEach(([selector, key]) => {
+      document.querySelector(selector)?.addEventListener("change", (event) => { const setters = { workTagFilter: (v) => workTagFilter = v, workAuthorFilter: (v) => workAuthorFilter = v, workFormatFilter: (v) => workFormatFilter = v, workSerialFilter: (v) => workSerialFilter = v, workPeriodFilter: (v) => workPeriodFilter = v }; setters[key](event.target.value); saveWorkFilters(); renderWorks(); });
+    });
+    document.querySelector("[data-clear-work-filters]")?.addEventListener("click", () => { clearWorkFilters(); });
   }
+
 
   function renderWork(id) {
     const work = workById(id);
@@ -833,6 +983,10 @@
     const liked = state.likedWorks.includes(work.id);
     const favorited = state.favoritedWorks.includes(work.id);
     const comments = Array.isArray(work.comments) ? work.comments : [];
+    const orderedComments = [...comments].sort((a, b) => workCommentSort === "hot" ? (Number(b.likes) || 0) - (Number(a.likes) || 0) : asTime(b.at) - asTime(a.at));
+    const commentGroups = groupWorkComments(orderedComments);
+    if (workReplyTo && !comments.some((comment) => comment.id === workReplyTo)) workReplyTo = "";
+    const workReplyTarget = workReplyTo ? comments.find((comment) => comment.id === workReplyTo) : null;
     const canRead = isPublishedWork(work);
     const canComment = canRead && work.allowComments !== false;
     const canFavorite = canRead && work.allowFavorites !== false;
@@ -848,15 +1002,24 @@
         ${serial ? `<section class="serial-overview"><div class="serial-cover"><span>${escapeHtml(work.category || "连载")}</span><strong>${escapeHtml(work.title)}</strong><small>${escapeHtml(work.author || "匿名作者")}</small></div><div class="serial-overview-main"><p>${escapeHtml(work.excerpt || "作者暂未填写作品简介。")}</p><div class="serial-summary"><div><span>作品形式</span><strong>连载作品</strong></div><div><span>连载状态</span><strong>${escapeHtml(serialStatusLabel(work.serialStatus))}</strong></div><div><span>章节数量</span><strong>${chapterCount}</strong></div><div><span>最新章节</span><strong>${escapeHtml(latestChapter || "暂无章节")}</strong></div><div><span>更新时间</span><strong>${escapeHtml(updated || "暂无")}</strong></div></div>${serialCatalogHtml(work)}</div></section><h2 class="serial-opening-title">开篇内容</h2>` : ""}
         <div class="reading-content">${(work.body || []).map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}</div>
       </article>
-      <aside class="article-aside"><section class="author-brief">${author ? `${avatarHtml(author)}<h2>${escapeHtml(author.name)}</h2>${author.bio ? `<p>${escapeHtml(author.bio)}</p>` : ""}<button class="link-button" type="button" data-author="${author.id}">查看作者主页</button>` : '<p class="muted">作者信息暂无。</p>'}</section><section class="comment-section"><h2 class="section-title">评论 <span class="muted">${comments.length}</span></h2><div id="comment-list">${comments.length ? comments.map(commentItem).join("") : '<p class="muted">还没有评论。</p>'}</div>${canComment ? `<form id="comment-form"><div class="field"><textarea class="textarea" name="comment" maxlength="500" required placeholder="写下具体、真诚的阅读感受"></textarea></div><button class="button button-primary" type="submit">发表评论</button></form>` : '<p class="muted">当前暂不开放评论。</p>'}</section></aside>
+      <aside class="article-aside"><section class="author-brief">${author ? `${avatarHtml(author)}<h2>${escapeHtml(author.name)}</h2>${author.bio ? `<p>${escapeHtml(author.bio)}</p>` : ""}<button class="link-button" type="button" data-author="${author.id}">查看作者主页</button>` : '<p class="muted">作者信息暂无。</p>'}</section><section class="comment-section"><div class="section-head"><h2 class="section-title">评论 <span class="muted">${comments.length}</span></h2>${comments.length > 1 ? `<div class="rank-tabs rank-subtabs"><button class="${workCommentSort === "latest" ? "is-active" : ""}" type="button" data-work-comment-sort="latest">最新</button><button class="${workCommentSort === "hot" ? "is-active" : ""}" type="button" data-work-comment-sort="hot">最热</button></div>` : ""}</div><div id="comment-list">${commentGroups.length ? commentGroups.map((group) => workCommentHtml(group.root, group.replies)).join("") : '<p class="muted">还没有评论。</p>'}</div>${canComment ? `<form id="comment-form"><div class="field"><label>${workReplyTarget ? `回复 ${escapeHtml(workReplyTarget.who)}` : "发表评论"}</label><textarea class="textarea" name="comment" maxlength="500" required placeholder="写下具体、真诚的阅读感受"></textarea></div><div class="chapter-comment-form-actions">${workReplyTarget ? '<button class="button button-small" type="button" data-work-comment-cancel-reply>取消回复</button>' : ""}<button class="button button-primary" type="submit">${workReplyTarget ? "发表回复" : "发表评论"}</button></div></form>` : '<p class="muted">当前暂不开放评论。</p>'}</section></aside>
     </div></div>`;
     document.querySelector("#comment-form")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!ensureLoggedIn()) return;
       const text = String(new FormData(event.currentTarget).get("comment") || "").trim();
       if (!text) return;
-      await performAction(`/api/works/${numericId(id)}/comments`, { text }, "评论已发表", () => renderWork(id));
+      await performAction(`/api/works/${numericId(id)}/comments`, { text, parentId: workReplyTo || "" }, workReplyTo ? "回复已发表" : "评论已发表", () => { workReplyTo = ""; renderWork(id); });
     });
+    document.querySelectorAll("[data-work-comment-cancel-reply]").forEach((button) => button.addEventListener("click", () => { workReplyTo = ""; renderWork(id); }));
+    document.querySelectorAll("[data-work-comment-sort]").forEach((button) => button.addEventListener("click", () => { workCommentSort = button.dataset.workCommentSort; renderWork(id); }));
+    document.querySelectorAll("[data-work-comment-like]").forEach((button) => button.addEventListener("click", () => { performAction(`/api/comments/${numericId(button.dataset.workCommentLike)}/like`, {}, "", () => renderWork(id)); }));
+    document.querySelectorAll("[data-work-comment-reply]").forEach((button) => button.addEventListener("click", () => { workReplyTo = button.dataset.workCommentReply; renderWork(id); document.querySelector("#comment-list")?.scrollIntoView({ block: "start" }); }));
+    document.querySelectorAll("[data-work-comment-report]").forEach((button) => button.addEventListener("click", () => reportWorkCommentDialog(work, button.dataset.workCommentReport)));
+    document.querySelectorAll("[data-work-comment-delete]").forEach((button) => button.addEventListener("click", async () => {
+      if (!await confirmDialog("确定删除这条评论吗？删除后从作品页隐藏，历史记录仍会保留。")) return;
+      await performAction(`/api/comments/${numericId(button.dataset.workCommentDelete)}/delete`, {}, "评论已删除", () => renderWork(id));
+    }));
     if (readingScrollHandler) window.removeEventListener("scroll", readingScrollHandler);
     readingScrollHandler = () => {
       const article = document.querySelector(".reading-article");
@@ -878,17 +1041,103 @@
     }
   }
 
-  function commentItem(comment) {
+  const groupWorkComments = (comments) => {
+    const byId = new Map(comments.map((comment) => [comment.id, comment]));
+    const topOf = (comment) => {
+      let current = comment;
+      for (let depth = 0; depth < 10; depth += 1) {
+        if (!current.parentId || !byId.has(current.parentId)) return current.id;
+        current = byId.get(current.parentId);
+      }
+      return current.id;
+    };
+    const roots = [];
+    const replies = new Map();
+    comments.forEach((comment) => {
+      const top = topOf(comment);
+      if (top === comment.id) { roots.push(comment); return; }
+      if (!replies.has(top)) replies.set(top, []);
+      replies.get(top).push(comment);
+    });
+    return roots.map((root) => ({ root, replies: replies.get(root.id) || [] }));
+  };
+
+  function workCommentHtml(comment, replies = []) {
     const at = typeof comment.at === "number" ? formatRelativeTime(comment.at) : String(comment.at || "");
-    return `<div class="comment"><div class="comment-head"><strong>${escapeHtml(comment.who)}</strong><time>${escapeHtml(at)}</time></div><p>${escapeHtml(comment.text)}</p></div>`;
+    return `<article class="comment work-comment"><div class="comment-head"><strong>${escapeHtml(comment.who)}</strong><time>${escapeHtml(at)}</time></div><p>${escapeHtml(comment.text)}</p><div class="chapter-comment-actions"><button class="button button-small ${comment.liked ? "is-active" : ""}" type="button" data-work-comment-like="${comment.id}">赞 ${Number(comment.likes) || 0}</button><button class="button button-small" type="button" data-work-comment-reply="${comment.id}">回复</button><button class="button button-small" type="button" data-work-comment-report="${comment.id}">举报</button>${comment.canDelete ? `<button class="button button-small button-danger" type="button" data-work-comment-delete="${comment.id}">删除</button>` : ""}</div>${replies.length ? `<div class="chapter-comment-replies">${replies.map((reply) => workCommentHtml(reply)).join("")}</div>` : ""}</article>`;
+  }
+
+  function reportWorkCommentDialog(work, commentId) {
+    if (!ensureLoggedIn()) return;
+    const comment = (work.comments || []).find((item) => item.id === commentId);
+    if (!comment) return;
+    const reasons = ["垃圾信息", "色情或低俗内容", "暴力或威胁", "违法内容", "人身攻击", "其他"];
+    openModal("举报评论", `<p>举报只提交这条评论和必要说明。</p><form id="report-work-comment-form"><div class="field"><label>举报原因</label><select class="select" name="reason">${reasons.map((reason) => `<option>${reason}</option>`).join("")}</select></div><div class="field"><label>补充说明</label><textarea class="textarea" name="detail" maxlength="500" placeholder="可补充具体情况"></textarea></div></form>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-danger" type="button" id="submit-work-comment-report">提交举报</button></div>');
+    document.querySelector("#submit-work-comment-report").addEventListener("click", async () => {
+      const data = new FormData(document.querySelector("#report-work-comment-form"));
+      await performAction("/api/reports", {
+        type: "作品评论",
+        targetId: comment.id,
+        target: `《${work.title}》的评论`,
+        reason: String(data.get("reason") || ""),
+        detail: String(data.get("detail") || ""),
+        suspectedOriginalUrl: "",
+        message: comment.text
+      }, "举报已提交", () => closeModal());
+    });
   }
 
   function authorCard(author) {
     const works = worksByAuthor(author.name);
     const likes = works.reduce((sum, work) => sum + (Number(work.likes) || 0), 0);
-    return `<article class="author-card"><div class="author-card-head"><span class="avatar">${escapeHtml(author.name.slice(0, 1))}</span><div><h3>${escapeHtml(author.name)}</h3>${author.awardCount ? `<span class="author-level">${Number(author.awardCount) || 0} 次获奖</span>` : ""}</div></div>${author.bio ? `<p>${escapeHtml(author.bio)}</p>` : ""}<div class="author-stats"><span><strong>${works.length}</strong> 篇作品</span><span><strong>${likes}</strong> 次点赞</span></div>${works[0] ? `<small class="author-latest">作品《${escapeHtml(works[0].title)}》</small>` : ""}<div class="form-row"><button class="button button-small" type="button" data-author="${author.id}">查看主页</button><button class="button button-small button-primary" type="button" data-message-author="${author.id}">私信</button></div></article>`;
+    return `<article class="author-card"><div class="author-card-head">${avatarHtml(author)}<div><h3>${escapeHtml(author.name)}</h3>${author.awardCount ? `<span class="author-level">${Number(author.awardCount) || 0} 次获奖</span>` : ""}</div></div>${author.bio ? `<p>${escapeHtml(author.bio)}</p>` : ""}<div class="author-stats"><span><strong>${works.length}</strong> 篇作品</span><span><strong>${likes}</strong> 次点赞</span></div>${works[0] ? `<small class="author-latest">作品《${escapeHtml(works[0].title)}》</small>` : ""}<div class="form-row"><button class="button button-small" type="button" data-author="${author.id}">查看主页</button><button class="button button-small button-primary" type="button" data-message-author="${author.id}">私信</button></div></article>`;
   }
 
+  function renderSearch() {
+    const term = globalSearchTerm.trim();
+    const terms = term.toLowerCase().split(/\s+/).filter(Boolean);
+    const matchesTerms = (text) => {
+      const haystack = String(text || "").toLowerCase();
+      return terms.length > 0 && terms.every((token) => haystack.includes(token));
+    };
+    const works = terms.length ? publicWorks().filter((work) => {
+      const body = Array.isArray(work.body) ? work.body.join(" ") : "";
+      const format = isSerialWork(work) ? "连载 连载作品" : "单篇 单篇作品";
+      return matchesTerms([work.title, work.author, work.excerpt, work.category, ...workTags(work), format, body].join(" "));
+    }).sort((a, b) => asTime(b.createdAt || b.publishedAt) - asTime(a.createdAt || a.publishedAt)) : [];
+    const serialWorks = works.filter(isSerialWork);
+    const singleWorks = works.filter((work) => !isSerialWork(work));
+    const authors = terms.length ? allAuthors().filter((author) => {
+      if (!worksByAuthor(author.name).length) return false;
+      return matchesTerms([author.name, author.bio].join(" "));
+    }).sort((a, b) => (Number(b.workCount) || worksByAuthor(b.name).length) - (Number(a.workCount) || worksByAuthor(a.name).length)) : [];
+    const resultCount = works.length + authors.length;
+    app.innerHTML = `<div class="page">
+      <header class="page-head"><div><p class="eyebrow">站内检索</p><h1 class="page-title">搜索</h1><p class="page-note">搜索作品名、作者笔名、关键词、标签或类型。结果只包含公开内容。</p></div></header>
+      <form class="toolbar" id="global-search-form" role="search">
+        <label class="search-box"><input id="global-search" name="q" type="search" value="${escapeHtml(globalSearchTerm)}" placeholder="输入作品、作者、标签或类型" autofocus></label>
+        <button class="button button-primary" type="submit">搜索</button>
+        ${term ? '<button class="button button-quiet" type="button" data-search-clear>清空</button>' : ""}
+      </form>
+      ${!term ? '<div class="empty compact-empty">输入关键词后，会同时搜索作品与作者。</div>' : resultCount ? `
+        <p class="muted work-result-count">找到 ${works.length} 篇作品、${authors.length} 位作者。</p>
+        ${serialWorks.length ? `<section class="section"><div class="section-head"><div><p class="eyebrow">作品结果</p><h2 class="section-title">连载作品</h2></div><span class="muted">${serialWorks.length} 篇</span></div><div class="work-grid">${serialWorks.map(workCard).join("")}</div></section>` : ""}
+        ${singleWorks.length ? `<section class="section"><div class="section-head"><div><p class="eyebrow">作品结果</p><h2 class="section-title">单篇作品</h2></div><span class="muted">${singleWorks.length} 篇</span></div><div class="work-grid">${singleWorks.map(workCard).join("")}</div></section>` : ""}
+        ${authors.length ? `<section class="section"><div class="section-head"><div><p class="eyebrow">作者结果</p><h2 class="section-title">作者</h2></div><span class="muted">${authors.length} 位</span></div><div class="author-grid">${authors.map(authorCard).join("")}</div></section>` : ""}
+      ` : `<div class="empty compact-empty">没有找到与“${escapeHtml(term)}”匹配的公开内容。</div>`}
+    </div>`;
+    const searchInput = document.querySelector("#global-search");
+    searchInput?.addEventListener("input", (event) => {
+      globalSearchTerm = event.target.value;
+      renderSearch();
+      document.querySelector("#global-search")?.focus();
+    });
+    document.querySelector("#global-search-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      globalSearchTerm = String(new FormData(event.currentTarget).get("q") || "");
+      renderSearch();
+    });
+  }
   function renderAuthors() {
     const authors = allAuthors().filter((author) => worksByAuthor(author.name).length);
     app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">作者会客厅</p><h1 class="page-title">作者</h1></div><p class="page-note">作者信息来自公开作品与站内公开资料。</p></header>${authors.length ? `<div class="author-grid" style="margin-top:28px">${authors.map(authorCard).join("")}</div>` : '<div class="empty compact-empty">暂无可展示的作者。</div>'}</div>`;
@@ -900,13 +1149,42 @@
     const works = worksByAuthor(author.name);
     const monthly = works.filter((work) => state.monthlyAwards.some((award) => award.workId === work.id));
     const likes = works.reduce((sum, work) => sum + (Number(work.likes) || 0), 0);
+    const views = works.reduce((sum, work) => sum + (Number(work.views) || 0), 0);
     const words = works.reduce((sum, work) => sum + wordCount(work), 0);
+    const serialWorks = works.filter(isSerialWork);
+    const completedWorks = serialWorks.filter((work) => (work.serialStatus || "") === "COMPLETED");
+    const chosenRepresentative = (Array.isArray(author.featuredWorks) ? author.featuredWorks : []).map(workById).filter(Boolean);
+    const representative = chosenRepresentative.length ? chosenRepresentative.slice(0, 3) : [...monthly, ...works]
+      .filter((work, index, list) => list.findIndex((item) => item.id === work.id) === index)
+      .sort((a, b) => (Number(b.likes) || 0) - (Number(a.likes) || 0) || (Number(b.views) || 0) - (Number(a.views) || 0))
+      .slice(0, 3);
+    const dynamics = [];
+    works.forEach((work) => {
+      const created = work.publishedAt || work.createdAt;
+      if (created) dynamics.push({ at: created, text: `发布作品《${work.title}》`, workId: work.id });
+      if (isSerialWork(work) && work.updatedAt && asTime(work.updatedAt) > asTime(created)) dynamics.push({ at: work.updatedAt, text: `更新连载《${work.title}》`, workId: work.id });
+    });
+    state.monthlyAwards.filter((award) => works.some((work) => work.id === award.workId)).forEach((award) => {
+      const work = workById(award.workId);
+      if (work) dynamics.push({ at: award.selectedAt || "", text: `《${work.title}》入选 ${award.month} 月度优秀`, workId: work.id });
+    });
+    (state.featuredPicks || []).filter((pick) => works.some((work) => work.id === pick.workId)).forEach((pick) => {
+      const work = workById(pick.workId);
+      if (work) dynamics.push({ at: pick.selectedAt || "", text: `《${work.title}》入选芳菲之选${pick.reason ? `：${pick.reason}` : ""}`, workId: work.id });
+    });
+    dynamics.sort((a, b) => asTime(b.at) - asTime(a.at));
+    const joinedAt = formatDate(author.joinedAt);
     const followed = state.followed.includes(author.id);
+    const authorSection = (eyebrow, title, items, emptyText) => `<section class="section"><div class="section-head"><div><p class="eyebrow">${eyebrow}</p><h2 class="section-title">${title} <span class="muted">${items.length}</span></h2></div></div>${items.length ? `<div class="work-grid">${items.map(workCard).join("")}</div>` : `<div class="empty compact-empty">${emptyText}</div>`}</section>`;
     app.innerHTML = `<div class="page"><button class="link-button" type="button" data-route="authors">← 返回作者列表</button>
-      <header class="author-profile"><div class="author-profile-main"><span class="avatar">${escapeHtml(author.name.slice(0, 1))}</span><div><p class="eyebrow">作者主页</p><h1 class="page-title">${escapeHtml(author.name)}</h1>${author.bio ? `<p class="page-note">${escapeHtml(author.bio)}</p>` : ""}</div></div><div class="author-profile-actions"><button class="button" type="button" data-follow="${author.id}">${followed ? "已关注" : "关注作者"}</button><button class="button button-primary" type="button" data-message-author="${author.id}">私信作者</button></div></header>
-      <section class="author-dashboard"><article><strong>${works.length}</strong><span>作品数量</span></article><article><strong>${monthly.length}</strong><span>月度优秀</span></article><article><strong>${likes}</strong><span>获得点赞</span></article><article><strong>${words}</strong><span>总字数</span></article></section>
+      <header class="author-profile"><div class="author-profile-main">${avatarHtml(author)}<div><p class="eyebrow">作者主页</p><h1 class="page-title">${escapeHtml(author.name)}</h1>${author.bio ? `<p class="page-note">${escapeHtml(author.bio)}</p>` : ""}${joinedAt ? `<p class="author-joined">加入于 ${escapeHtml(joinedAt)}</p>` : ""}</div></div><div class="author-profile-actions"><button class="button" type="button" data-follow="${author.id}">${followed ? "已关注" : "关注作者"}</button><button class="button button-primary" type="button" data-message-author="${author.id}">私信作者</button></div></header>
+      <section class="author-dashboard"><article><strong>${works.length}</strong><span>作品数量</span></article><article><strong>${monthly.length}</strong><span>月度优秀</span></article><article><strong>${likes}</strong><span>获得点赞</span></article><article><strong>${views}</strong><span>累计阅读</span></article><article><strong>${Number(author.followerCount) || 0}</strong><span>关注人数</span></article><article><strong>${words}</strong><span>总字数</span></article></section>
       ${author.awardCount ? `<section class="section"><div class="section-head"><h2 class="section-title">获奖记录</h2></div><p>${Number(author.awardCount) || 0} 次获奖。</p></section>` : ""}
-      <section class="section"><div class="section-head"><div><p class="eyebrow">作品集</p><h2 class="section-title">公开作品</h2></div></div>${works.length ? `<div class="work-grid">${works.map(workCard).join("")}</div>` : '<div class="empty compact-empty">这位作者还没有公开作品。</div>'}</section>
+      <section class="section"><div class="section-head"><div><p class="eyebrow">创作动态</p><h2 class="section-title">近期动态 <span class="muted">${dynamics.length}</span></h2></div></div>${dynamics.length ? `<div class="society-feed">${dynamics.slice(0, 8).map((item) => `<article><time>${escapeHtml(formatDate(item.at) || "")}</time><div><p>${escapeHtml(item.text)}</p><button class="link-button" type="button" data-work="${item.workId}">阅读</button></div></article>`).join("")}</div>` : '<div class="empty compact-empty">这位作者还没有可展示的创作动态。</div>'}</section>
+      ${authorSection("代表作品", "代表作品", representative, "这位作者还没有公开作品。")}
+      ${authorSection("作品集", "全部作品", works, "这位作者还没有公开作品。")}
+      ${authorSection("连载作品", "连载作品", serialWorks, "这位作者还没有连载作品。")}
+      ${authorSection("连载作品", "已完成作品", completedWorks, "这位作者还没有已完结的连载作品。")}
     </div>`;
   }
 
@@ -1110,6 +1388,46 @@
   }
 
 
+  function renderStartHere() {
+    const groups = [["青春校园", "青春"], ["温柔治愈", "治愈"], ["奇幻幻想", "奇幻"], ["悬疑推理", "悬疑"], ["诗歌", "诗歌"], ["散文", "散文"], ["连载小说", "serial"]];
+    const cards = groups.map(([label, key]) => {
+      const pool = key === "serial" ? publicWorks().filter(isSerialWork) : publicWorks().filter((work) => work.category === key || workTags(work).includes(key));
+      return { label, key, count: pool.length };
+    });
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">第一次来芳菲</p><h1 class="page-title">从这里开始</h1><p class="page-note">按真实的分类与标签挑选方向，点开后进入筛选后的作品列表。</p></div></header><section class="section"><div class="start-grid">${cards.map((item) => `<button class="start-card" type="button" data-start-filter="${item.key}"><strong>${escapeHtml(item.label)}</strong><small>${item.count} 篇公开作品</small></button>`).join("")}</div></section></div>`;
+  }
+
+  function renderJournal() {
+    const entries = [];
+    state.monthlyAwards.forEach((award) => { const work = workById(award.workId); if (work) entries.push({ month: award.month || "往期", work, kind: "月度优秀", reason: award.reason || "" }); });
+    (state.featuredPicks || []).forEach((pick) => { const work = workById(pick.workId); if (work) entries.push({ month: (pick.selectedAt || "").slice(0, 7) || "往期", work, kind: "芳菲之选", reason: pick.reason || "" }); });
+    const byMonth = new Map();
+    entries.forEach((entry) => { if (!byMonth.has(entry.month)) byMonth.set(entry.month, []); byMonth.get(entry.month).push(entry); });
+    const months = [...byMonth.keys()].sort((a, b) => b.localeCompare(a));
+    const years = [...new Set(months.map((month) => month.slice(0, 4) || "往期"))];
+    const body = years.map((year) => `<section class="section"><div class="section-head"><div><p class="eyebrow">芳菲刊</p><h2 class="section-title">${escapeHtml(year)} 年</h2></div><span class="muted">${months.filter((month) => (month.slice(0, 4) || "往期") === year).length} 期</span></div>${months.filter((month) => (month.slice(0, 4) || "往期") === year).map((month) => `<article class="journal-issue"><h3>${escapeHtml(month)} 刊</h3><ul class="admin-list">${byMonth.get(month).map((entry) => `<li class="admin-row"><span><strong>${escapeHtml(entry.work.title)}</strong><small class="admin-note">${escapeHtml(entry.kind)} · ${escapeHtml(entry.work.author)}${entry.reason ? ` · ${escapeHtml(entry.reason)}` : ""}</small></span><button class="button button-small" type="button" data-work="${entry.work.id}">阅读</button></li>`).join("")}</ul></article>`).join("")}</section>`).join("");
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">按月份归档</p><h1 class="page-title">芳菲月刊</h1><p class="page-note">由真实的月度优秀与芳菲之选记录归档而成，不生成虚构内容。</p></div></header>${months.length ? body : '<div class="empty">还没有可归档的月度内容。</div>'}</div>`;
+  }
+
+  function renderArchive() {
+    const events = [];
+    const earliest = state.works.map((work) => work.publishedAt || work.createdAt).filter(Boolean).sort((a, b) => asTime(a) - asTime(b))[0];
+    if (earliest) events.push({ year: String(new Date(earliest).getFullYear()), label: "网站上线 · 芳菲文学社开始记录公开作品", detail: formatDate(earliest) });
+    state.activities.forEach((activity) => events.push({ year: (String(activity.date || "").match(/\d{4}/) || [])[0] || "往期", label: `文学活动 · ${activity.title}`, detail: activity.date || "" }));
+    state.monthlyAwards.forEach((award) => { const work = workById(award.workId); if (work) events.push({ year: (award.month || "").slice(0, 4) || "往期", label: `年度优秀 · 《${work.title}》`, detail: award.month || "", workId: work.id }); });
+    state.announcements.forEach((item) => events.push({ year: String(item.at || "").slice(0, 4) || "往期", label: `公告 · ${item.title}`, detail: formatDate(item.at) }));
+    const years = [...new Set(events.map((event) => event.year))].sort((a, b) => b.localeCompare(a));
+    const body = years.map((year) => `<section class="section"><div class="section-head"><div><p class="eyebrow">芳菲档案馆</p><h2 class="section-title">${escapeHtml(year)} 年</h2></div><span class="muted">${events.filter((event) => event.year === year).length} 条记录</span></div><div class="society-feed">${events.filter((event) => event.year === year).map((event) => `<article><time>${escapeHtml(event.detail || "")}</time><div><p>${escapeHtml(event.label)}</p>${event.workId ? `<button class="link-button" type="button" data-work="${event.workId}">阅读</button>` : ""}</div></article>`).join("")}</div></section>`).join("");
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">长期数字档案</p><h1 class="page-title">文学社档案</h1><p class="page-note">按年份归档活动、优秀作品、公告与作品起点，只展示真实记录。</p></div></header>${events.length ? body : '<div class="empty">档案还是空的，等第一份记录写下。</div>'}</div>`;
+  }
+
+  function openRandomWork(scope = "all") {
+    const pool = publicWorks().filter((work) => scope === "all" ? true : scope === "serial" ? isSerialWork(work) : work.category === scope);
+    if (!pool.length) return showToast("暂无可随机阅读的公开作品");
+    const work = pool[Math.floor(Math.random() * pool.length)];
+    setRoute(`work/${work.id}`);
+  }
+
   function renderRanking() {
     const periods = [["month", "本月"], ["quarter", "本季"], ["year", "本年"], ["all", "总榜"]];
     const workRows = rankedWorks();
@@ -1119,7 +1437,15 @@
     const workPanel = workRows.length ? `<div class="rank-podium">${workRows.slice(0, 3).map((work, index) => `<article class="rank-podium-card rank-${index + 1}"><span>${index + 1}</span><button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><small>${escapeHtml(work.author)}</small><strong>${Number(work.score ?? rankingScore(work))} 热度</strong><small>${Number(work.views) || 0} 阅读 · ${Number(work.likes) || 0} 点赞 · ${Number(work.favorites) || 0} 收藏</small></article>`).join("")}</div><ol class="rank-list">${workRows.slice(3).map((work, index) => `<li class="rank-item"><span class="rank-number">${String(index + 4).padStart(2, "0")}</span><button class="link-button rank-title" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><span class="muted">${escapeHtml(work.author)} · ${Number(work.score ?? rankingScore(work))} 热度 · ${Number(work.views) || 0} 阅读 · ${Number(work.likes) || 0} 点赞 · ${Number(work.comments) || 0} 评论</span></li>`).join("")}</ol>` : '<div class="empty compact-empty">所选周期暂无排行数据。</div>';
     const authorPanel = authorRows.length ? `<ol class="rank-list">${authorRows.map((author, index) => `<li class="rank-item"><span class="rank-number">${String(index + 1).padStart(2, "0")}</span><button class="link-button rank-title" type="button" data-author="${author.id}">${escapeHtml(author.name)}</button><span class="muted">${authorLabels[rankingAuthorMetric]} ${Number(author[authorKeys[rankingAuthorMetric]]) || 0} · ${Number(author.works) || 0} 篇作品 · ${Number(author.awards) || 0} 次获奖 · ${Number(author.words) || 0} 字</span></li>`).join("")}</ol>` : '<div class="empty compact-empty">暂无作者排行数据。</div>';
     const weights = state.rankingWeights || DEFAULT_RANKING_WEIGHTS;
-    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">真实数据，不合成虚假结果</p><h1 class="page-title">排行榜</h1><p class="page-note">只统计已审核、已公开且未删除作品。月度 / 季度 / 年度热度只计算所选周期内的真实互动；总榜使用现有累计阅读。热度 = 阅读 ${weights.views} + 点赞 ${weights.likes} + 收藏 ${weights.favorites} + 评论 ${weights.comments} 的加权结果。</p></div></header><div class="ranking-controls"><div class="rank-tabs">${periods.map(([id, label]) => `<button class="${rankingPeriod === id ? "is-active" : ""}" type="button" data-rank-period="${id}">${label}</button>`).join("")}</div><div class="rank-tabs"><button class="${rankingBoard === "works" ? "is-active" : ""}" type="button" data-rank-board="works">作品榜</button><button class="${rankingBoard === "authors" ? "is-active" : ""}" type="button" data-rank-board="authors">作者榜</button></div></div>${rankingBoard === "works" ? workPanel : `<div class="rank-tabs rank-subtabs">${Object.entries(authorLabels).map(([id, label]) => `<button class="${rankingAuthorMetric === id ? "is-active" : ""}" type="button" data-rank-author-metric="${id}">${label}</button>`).join("")}</div>${authorPanel}`}</div>`;
+    const discovered = publicWorks();
+    const weekHits = discovered.slice().sort((a, b) => (Number(b.views) || 0) - (Number(a.views) || 0)).slice(0, 5);
+    const weekHeat = discovered.slice().sort((a, b) => ((Number(b.likes) || 0) + (Number(b.favorites) || 0)) - ((Number(a.likes) || 0) + (Number(a.favorites) || 0))).slice(0, 5);
+    const newest = discovered.slice().sort((a, b) => asTime(b.publishedAt || b.createdAt) - asTime(a.publishedAt || a.createdAt)).slice(0, 5);
+    const serialFresh = discovered.filter(isSerialWork).sort((a, b) => asTime(b.updatedAt) - asTime(a.updatedAt)).slice(0, 5);
+    const featuredNow = (state.featuredPicks || []).map((pick) => workById(pick.workId)).filter(Boolean).slice(0, 5);
+    const dimList = (title, items, metric) => `<section class="section"><div class="section-head"><h3 class="section-title">${title}</h3></div>${items.length ? `<ol class="rank-list">${items.map((work, index) => `<li class="rank-item"><span class="rank-number">${String(index + 1).padStart(2, "0")}</span><button class="link-button rank-title" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button><span class="muted">${escapeHtml(work.author)} · ${metric(work)}</span></li>`).join("")}</ol>` : '<div class="empty compact-empty">暂无数据。</div>'}</section>`;
+    const discoverRanking = `<div class="section-split">${dimList("阅读最多", weekHits, (work) => `${Number(work.views) || 0} 阅读`)}${dimList("点赞与收藏最多", weekHeat, (work) => `${Number(work.likes) || 0} 点赞 · ${Number(work.favorites) || 0} 收藏`)}</div><div class="section-split">${dimList("最新作品", newest, (work) => formatDate(work.publishedAt || work.createdAt) || "时间未记录")}${dimList("连载更新", serialFresh, (work) => work.latestChapter ? `更新至 ${escapeHtml(work.latestChapter)}` : `共 ${Number(work.chapterCount) || 0} 章`)}</div>${dimList("芳菲之选", featuredNow, (work) => featuredPickById(work.id)?.reason || "编辑部推荐")}`;
+    app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">真实数据，不合成虚假结果</p><h1 class="page-title">排行榜</h1><p class="page-note">只统计已审核、已公开且未删除作品。月度 / 季度 / 年度热度只计算所选周期内的真实互动；总榜使用现有累计阅读。热度 = 阅读 ${weights.views} + 点赞 ${weights.likes} + 收藏 ${weights.favorites} + 评论 ${weights.comments} 的加权结果。</p></div></header><div class="ranking-controls"><div class="rank-tabs">${periods.map(([id, label]) => `<button class="${rankingPeriod === id ? "is-active" : ""}" type="button" data-rank-period="${id}">${label}</button>`).join("")}</div><div class="rank-tabs"><button class="${rankingBoard === "works" ? "is-active" : ""}" type="button" data-rank-board="works">作品榜</button><button class="${rankingBoard === "authors" ? "is-active" : ""}" type="button" data-rank-board="authors">作者榜</button></div></div>${rankingBoard === "works" ? workPanel : `<div class="rank-tabs rank-subtabs">${Object.entries(authorLabels).map(([id, label]) => `<button class="${rankingAuthorMetric === id ? "is-active" : ""}" type="button" data-rank-author-metric="${id}">${label}</button>`).join("")}</div>${authorPanel}`}${discoverRanking}</div>`;
   }
 
   function activityCard(activity) {
@@ -1157,7 +1483,7 @@
 
   function renderAdmin() {
     if (!isAdmin()) return renderMissing("需要管理员权限才能进入管理后台");
-    const tabs = ["概览", "系统状态", "作品审核", "评论管理", "私信举报", "用户管理", "月度评选", "文学活动", "每周话题", "公告", "风控", "Agent 审核", "安全日志"];
+    const tabs = ["概览", "系统状态", "作品审核", "评论管理", "内容处理", "用户管理", "月度评选", "芳菲之选", "文学活动", "每周话题", "公告", "风控", "Agent 审核", "安全日志"];
     if (isSuperAdmin()) tabs.splice(5, 0, "管理员管理");
     if (!tabs.includes(adminTab)) adminTab = "概览";
     app.innerHTML = `<div class="page"><header class="page-head"><div><p class="eyebrow">运营控制台</p><h1 class="page-title">管理后台</h1><p class="page-note">服务端校验高级管理员与超级管理员权限，前端只负责显示可执行操作。</p></div></header><nav class="admin-tabs">${tabs.map((tab) => `<button class="${adminTab === tab ? "is-active" : ""}" type="button" data-admin-tab="${tab}">${tab}</button>`).join("")}</nav><section id="admin-content">${adminContent()}</section></div>`;
@@ -1279,9 +1605,23 @@
         startsAt: String(data.get("startsAt") || ""),
         endsAt: String(data.get("endsAt") || ""),
         status: String(data.get("status") || "筹备中"),
+        activityType: String(data.get("activityType") || "社团活动"),
+        relatedWorkIds: data.getAll("relatedWorkIds").map((value) => String(value)),
         rules: String(data.get("rules") || "").trim()
       }, "活动已创建", () => renderAdmin());
     });
+    document.querySelector("#admin-featured-pick-form")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(event.currentTarget);
+      await performAction("/api/admin/featured-picks", {
+        workId: String(data.get("workId") || ""),
+        reason: String(data.get("reason") || "").trim()
+      }, "芳菲之选已保存", () => renderAdmin());
+    });
+    document.querySelectorAll("[data-featured-pick-revoke]").forEach((button) => button.addEventListener("click", async () => {
+      if (!await confirmDialog("确定撤销这条芳菲之选记录吗？")) return;
+      await performAction(`/api/admin/featured-picks/${numericId(button.dataset.featuredPickRevoke)}/revoke`, {}, "芳菲之选已撤销", () => renderAdmin());
+    }));
     document.querySelector("#admin-appoint-form")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const data = new FormData(event.currentTarget);
@@ -1308,14 +1648,32 @@
     const activeAwards = state.monthlyAwards.filter((award) => award.status === "active");
     const userRows = state.users.length ? state.users : allAuthors();
     if (adminTab === "系统状态") return `<div class="panel admin-panel"><h2 class="section-title">系统健康中心</h2><p class="muted">只读检测，不修改系统配置。</p><ul class="admin-list">${state.systemHealth.length ? state.systemHealth.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.name)}</strong><small class="admin-note">${escapeHtml(item.detail)}</small></span><span class="status-pill">${escapeHtml(item.status)}</span></li>`).join("") : '<li class="empty">暂无可检测状态。</li>'}</ul></div>`;
-    if (adminTab === "概览") return `<div class="admin-grid"><div class="metric"><strong>${pending.length}</strong><span>待审核投稿</span></div><div class="metric"><strong>${state.works.length}</strong><span>作品总数</span></div><div class="metric"><strong>${state.reports.filter((item) => item.status === "待处理").length}</strong><span>待处理举报</span></div><div class="metric"><strong>${activeAwards.length}</strong><span>月度优秀</span></div><div class="metric"><strong>${state.users.length}</strong><span>用户账号</span></div><div class="metric"><strong>${state.activities.length}</strong><span>文学活动</span></div></div><ul class="admin-list"><li class="admin-row"><span><strong>审核流程</strong><small class="admin-note">投稿先进入审核中，管理员可发布、退回或下架。</small></span><span class="muted">服务端校验</span></li><li class="admin-row"><span><strong>Agent 边界</strong><small class="admin-note">Agent 只辅助分析，不自动决定作品是否发布。</small></span><span class="status-pill">PASSIVE</span></li><li class="admin-row"><span><strong>最近操作</strong><small class="admin-note">${escapeHtml(state.auditLogs[0]?.text || "暂无操作记录")}</small></span><span class="muted">${escapeHtml(state.auditLogs[0]?.at || "")}</span></li></ul>`;
+    if (adminTab === "概览") {
+      const overview = state.adminOverview || {};
+      const today = overview.today || {};
+      const pendingInfo = overview.pending || {};
+      const content = overview.content || {};
+      const todayCards = [["users", "今日新增用户"], ["works", "今日新增作品"], ["comments", "今日新增评论"], ["views", "今日阅读"], ["favorites", "今日收藏"]];
+      const pendingCards = [["reviews", "待审核投稿"], ["reports", "待处理举报"], ["risks", "异常行为"]];
+      const overviewGrid = `<div class="admin-grid">${todayCards.map(([key, label]) => `<div class="metric"><strong>${Number(today[key]) || 0}</strong><span>${label}</span></div>`).join("")}${pendingCards.map(([key, label]) => `<div class="metric"><strong>${Number(pendingInfo[key]) || 0}</strong><span>${label}</span></div>`).join("")}</div>`;
+      const popular = Array.isArray(content.popular) ? content.popular : [];
+      const activeAuthors = Array.isArray(content.activeAuthors) ? content.activeAuthors : [];
+      const latest = Array.isArray(content.latest) ? content.latest : [];
+      const contentPanel = (title, items, render) => `<section class="section"><div class="section-head"><h3 class="section-title">${title}</h3></div>${items.length ? `<ul class="admin-list">${items.map(render).join("")}</ul>` : '<div class="empty compact-empty">暂无数据。</div>'}</section>`;
+      return `<div class="panel admin-panel"><div class="section-head"><div><h2 class="section-title">运营概览</h2><p class="muted">只读取真实表中的今日数据、待处理事项与内容排行。</p></div><span class="muted">${pending.length} 篇待审核</span></div>${overviewGrid}<ul class="admin-list"><li class="admin-row"><span><strong>审核流程</strong><small class="admin-note">投稿先进入审核中，管理员可发布、退回或下架。</small></span><span class="muted">服务端校验</span></li><li class="admin-row"><span><strong>Agent 边界</strong><small class="admin-note">Agent 只辅助分析，不自动决定作品是否发布。</small></span><span class="status-pill">PASSIVE</span></li><li class="admin-row"><span><strong>最近操作</strong><small class="admin-note">${escapeHtml(state.auditLogs[0]?.text || "暂无操作记录")}</small></span><span class="muted">${escapeHtml(state.auditLogs[0]?.at || "")}</span></li></ul>${contentPanel("热门作品", popular, (item) => `<li class="admin-row"><span><strong>${escapeHtml(item.title)}</strong><small class="admin-note">${escapeHtml(item.author)} · ${Number(item.views) || 0} 阅读 · ${Number(item.likes) || 0} 点赞</small></span><button class="button button-small" type="button" data-work="${item.id}">查看</button></li>`)}${contentPanel("活跃作者", activeAuthors, (item) => `<li class="admin-row"><span><strong>${escapeHtml(item.name)}</strong><small class="admin-note">${Number(item.works) || 0} 篇作品 · ${Number(item.views) || 0} 阅读</small></span><button class="button button-small" type="button" data-author="${item.id}">主页</button></li>`)}${contentPanel("最新作品", latest, (item) => `<li class="admin-row"><span><strong>${escapeHtml(item.title)}</strong><small class="admin-note">${escapeHtml(item.author)} · ${escapeHtml(item.at || "")}</small></span><button class="button button-small" type="button" data-work="${item.id}">查看</button></li>`)}</div>`;
+    }
     if (adminTab === "作品审核") return `<div class="panel admin-panel"><div class="section-head"><div><h2 class="section-title">作品审核</h2><p class="muted">公开作品与待审核投稿都从真实数据库读取。</p></div><span class="muted">${pending.length} 篇待处理</span></div><ul class="admin-list">${state.works.length ? state.works.map((work) => `<li class="admin-row"><span><strong>${escapeHtml(work.title)}</strong><small class="admin-note">${escapeHtml(work.author)} · ${escapeHtml(work.category)} · ${escapeHtml(statusLabel(work.status))} · ${Number(work.views) || 0} 阅读${work.reviewNote ? ` · 审核意见：${escapeHtml(work.reviewNote)}` : ""}</small></span><div class="admin-actions">${needsReview(work) ? `<button class="button button-small" type="button" data-review-action="reject" data-review-work="${work.id}">退回</button><button class="button button-small button-primary" type="button" data-review-action="publish" data-review-work="${work.id}">通过</button>` : work.status === "published" ? `<button class="button button-small button-quiet" type="button" data-review-action="hide" data-review-work="${work.id}">下架</button>` : `<button class="button button-small button-primary" type="button" data-review-action="publish" data-review-work="${work.id}">重新公开</button>`}<button class="button button-small button-danger" type="button" data-admin-work-delete="${work.id}">删除</button></div></li>`).join("") : '<li class="empty">暂无作品。</li>'}</ul>${pendingChapters.length ? `<h3 class="section-title">章节待人工复核</h3><ul class="admin-list">${pendingChapters.map((chapter) => `<li class="admin-row"><span><strong>${escapeHtml(chapter.workTitle)} · 第 ${chapter.chapterNumber} 章《${escapeHtml(chapter.title)}》</strong><small class="admin-note">${escapeHtml(chapter.reviewNote || "Agent 建议人工复核")}</small></span><div class="admin-actions"><button class="button button-small" type="button" data-chapter-review="reject" data-chapter-review-id="${chapter.id}">退回</button><button class="button button-small button-primary" type="button" data-chapter-review="publish" data-chapter-review-id="${chapter.id}">通过</button></div></li>`).join("")}</ul>` : ""}</div>`;
     if (adminTab === "评论管理") return `<div class="panel admin-panel"><div class="section-head"><h2 class="section-title">评论管理</h2><span class="muted">作品评论 ${comments.length} 条 · 章评 ${adminChapterComments.length} 条</span></div><ul class="admin-list">${comments.length ? comments.map((comment) => `<li class="admin-row"><span><strong>${escapeHtml(comment.who)}</strong><small class="admin-note">${escapeHtml(comment.text)} · 《${escapeHtml(comment.workTitle)}》</small></span><button class="button button-small button-danger" type="button" data-comment-delete="${comment.id}">删除</button></li>`).join("") : '<li class="empty">当前没有读者评论。</li>'}</ul>${adminChapterComments.length ? `<h3 class="section-title">章节评论</h3><ul class="admin-list">${adminChapterComments.map((comment) => `<li class="admin-row"><span><strong>${escapeHtml(comment.who)}</strong><small class="admin-note">${escapeHtml(comment.text)} · 《${escapeHtml(comment.workTitle)}》第 ${comment.chapterNumber} 章${comment.parentId ? " · 回复" : ""}</small></span><button class="button button-small button-danger" type="button" data-admin-chapter-comment-delete="${comment.id}">删除</button></li>`).join("")}</ul>` : ""}</div>`;
-    if (adminTab === "私信举报") return `<div class="panel admin-panel"><h2 class="section-title">举报处理</h2><p class="muted">只处理被举报内容和必要上下文，不扫描普通私信。</p><ul class="admin-list">${state.reports.length ? state.reports.map((report) => `<li class="admin-row"><span><strong>${escapeHtml(report.target)} · ${escapeHtml(report.reason)}</strong><small class="admin-note">${escapeHtml(report.detail || report.message || "未补充说明")} · ${escapeHtml(report.at)}</small></span><select class="select select-small" data-report-status="${report.id}">${["待处理", "处理中", "已处理", "已驳回"].map((status) => `<option ${report.status === status ? "selected" : ""}>${status}</option>`).join("")}</select></li>`).join("") : '<li class="empty">当前没有举报记录。</li>'}</ul></div>`;
+    if (adminTab === "内容处理") return `<div class="panel admin-panel"><div class="section-head"><div><h2 class="section-title">举报与内容处理</h2><p class="muted">只读取与处理必要上下文；私信只在被举报时展示必要片段，不扫描普通私信。风险分级仅辅助判断，不作自动处罚。</p></div><span class="muted">共 ${state.reports.length} 条</span></div><ul class="admin-list">${state.reports.length ? state.reports.map((report) => { const risk = report.risk === "高" ? "report-risk-high" : report.risk === "中" ? "report-risk-mid" : "report-risk-low"; const targetLink = report.type === "作品" || report.type === "版权举报" || report.type === "版权 / 疑似抄袭" ? `#/work/w${report.targetId}` : ""; return `<li class="admin-row"><span><strong>${escapeHtml(report.target)} · ${escapeHtml(report.reason)}</strong><small class="admin-note"><span class="risk-badge ${risk}">风险 ${escapeHtml(report.risk || "未评估")}</span> ${escapeHtml(report.type || "举报")} · 举报人 ${escapeHtml(report.reporter || "匿名")} · ${escapeHtml(report.at || "")}</small><small class="admin-note">${escapeHtml(report.detail || report.message || "未填写补充说明")}</small>${report.suspectedUrl ? `<small class="admin-note">可疑原文：<a href="${escapeHtml(report.suspectedUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(report.suspectedUrl)}</a></small>` : ""}${report.message ? `<small class="admin-note">举报附件：${escapeHtml(report.message)}</small>` : ""}${report.riskReasons && report.riskReasons.length ? `<small class="admin-note">风险依据：${escapeHtml(report.riskReasons.join("；"))}</small>` : ""}${report.handledAt ? `<small class="admin-note">处理于 ${escapeHtml(report.handledAt)}${report.handledAction ? ` · ${escapeHtml(report.handledAction)}` : ""}</small>` : ""}</span><div class="admin-actions">${targetLink ? `<button class="button button-small" type="button" data-route="${targetLink}">查看</button>` : ""}<select class="select select-small" data-report-status="${report.id}">${["待处理", "处理中", "已处理", "已驳回"].map((status) => `<option ${report.status === status ? "selected" : ""}>${status}</option>`).join("")}</select><button class="button button-small button-primary" type="button" data-report-handle="${report.id}">处理</button></div></li>`; }).join("") : '<li class="empty">当前没有举报记录。</li>'}</ul></div>`;
     if (adminTab === "用户管理") return `<div class="panel admin-panel"><h2 class="section-title">用户与作者</h2><ul class="admin-list">${userRows.map((user) => `<li class="admin-row"><span><strong>${escapeHtml(user.name)}</strong><small class="admin-note">${escapeHtml(user.bio || "暂无简介")} · ${escapeHtml(user.adminLevel === "super" ? "超级管理员" : user.adminLevel === "senior" ? "高级管理员" : "普通用户")} · ${escapeHtml(user.accountStatus === "suspended" ? "已暂停" : "正常")}</small></span><div class="admin-actions">${user.id !== currentUserId() && !user.adminLevel ? `<button class="button button-small ${user.accountStatus === "suspended" ? "button-primary" : "button-quiet"}" type="button" data-user-id="${user.id}" data-user-status="${user.accountStatus === "suspended" ? "active" : "suspended"}">${user.accountStatus === "suspended" ? "恢复" : "暂停"}</button>` : ""}</div></li>`).join("")}</ul></div>`;
     if (adminTab === "管理员管理") return `<div class="panel admin-panel"><h2 class="section-title">高级管理员设置</h2><p class="muted">超级管理员最多任命 2 名高级管理员，名额限制由服务端强制校验。</p><div class="admin-form-grid"><form id="admin-appoint-form" class="admin-form"><h3>任命高级管理员</h3><div class="field"><label>普通用户</label><select class="select" name="userId">${userRows.filter((user) => !user.adminLevel && user.role !== "admin").map((user) => `<option value="${user.id}">${escapeHtml(user.name)}</option>`).join("") || '<option value="">暂无可任命用户</option>'}</select></div><button class="button button-primary" type="submit">任命</button></form><form id="admin-transfer-form" class="admin-form"><h3>转移高级管理员</h3><div class="field"><label>原高级管理员</label><select class="select" name="oldAdminId">${state.adminRoles.filter((role) => role.level === "senior").map((role) => `<option value="${role.userId}">${escapeHtml(role.name || role.userId)}</option>`).join("") || '<option value="">暂无高级管理员</option>'}</select></div><div class="field"><label>接任普通用户</label><select class="select" name="newAdminId">${userRows.filter((user) => !user.adminLevel && user.role !== "admin").map((user) => `<option value="${user.id}">${escapeHtml(user.name)}</option>`).join("") || '<option value="">暂无可接任用户</option>'}</select></div><div class="field"><label>转交原因</label><input class="input" name="reason" maxlength="300" required placeholder="填写转交原因"></div><button class="button button-primary" type="submit">转交权限</button></form></div><h3 class="section-title">当前管理员</h3><ul class="admin-list">${state.adminRoles.map((role) => `<li class="admin-row"><span><strong>${escapeHtml(role.name || role.userId)}</strong><small class="admin-note">${escapeHtml(role.level === "super" ? "超级管理员" : "高级管理员")} · 任命于 ${escapeHtml(role.appointedAt)}</small></span>${role.level === "senior" && isSuperAdmin() ? `<button class="button button-small button-danger" type="button" data-revoke-admin="${role.userId}">撤销</button>` : '<span class="status-pill">最高权限</span>'}</li>`).join("")}</ul><h3 class="section-title">权限转交记录</h3><ul class="admin-list">${state.adminTransfers.length ? state.adminTransfers.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.oldName || item.oldAdminId)} → ${escapeHtml(item.newName || item.newAdminId)}</strong><small class="admin-note">${escapeHtml(item.reason)} · 操作人 ${escapeHtml(item.operatorName || item.operatorId)} · ${escapeHtml(item.at)}</small></span></li>`).join("") : '<li class="empty">暂无转交记录。</li>'}</ul></div>`;
     if (adminTab === "月度评选") { const publicOptions = state.works.filter(isPublicWork); return `<div class="panel admin-panel"><h2 class="section-title">月度优秀评选</h2><p class="muted">只允许公开作品进入候选池。获奖记录会保存月份、类别、评选人、时间和推荐理由。</p><form id="admin-award-form" class="award-form"><div class="form-grid"><div class="field"><label>月份</label><input class="input" type="month" name="month" value="${new Date().toISOString().slice(0, 7)}" required></div><div class="field"><label>作品</label><select class="select" name="workId" required>${publicOptions.map((work) => `<option value="${work.id}">${escapeHtml(work.title)} · ${escapeHtml(work.author)}</option>`).join("") || '<option value="">暂无公开作品</option>'}</select></div><div class="field"><label>名次</label><input class="input" type="number" name="rank" min="1" max="20" value="1" required></div></div><div class="field"><label>推荐理由</label><textarea class="textarea" name="reason" maxlength="300" placeholder="说明该作品的文学价值或评选理由"></textarea></div><button class="button button-primary" type="submit">保存评选</button></form><h3 class="section-title">正式获奖记录</h3><ul class="admin-list">${activeAwards.length ? activeAwards.map((award) => `<li class="admin-row"><span><strong>${escapeHtml(award.month)} · ${escapeHtml(workById(award.workId)?.title || "作品")}</strong><small class="admin-note">${escapeHtml(award.category || "综合")} · 第 ${award.rank} 名 · ${escapeHtml(award.reason || "暂无推荐理由")} · 由 ${escapeHtml(award.selectedByName || "管理员")} 评选</small></span><button class="button button-small button-danger" type="button" data-revoke-award="${award.id}">撤销</button></li>`).join("") : '<li class="empty">暂无月度优秀记录。</li>'}</ul></div>`; }
-    if (adminTab === "文学活动") return `<div class="panel admin-panel"><h2 class="section-title">文学活动</h2><form id="admin-activity-form" class="admin-form"><div class="form-grid"><div class="field"><label>活动名称</label><input class="input" name="title" maxlength="80" required></div><div class="field"><label>状态</label><select class="select" name="status">${["筹备中", "报名中", "进行中", "已结束"].map((status) => `<option>${status}</option>`).join("")}</select></div><div class="field"><label>开始时间</label><input class="input" type="date" name="startsAt"></div><div class="field"><label>截止时间</label><input class="input" type="date" name="endsAt"></div></div><div class="field"><label>活动介绍</label><textarea class="textarea" name="description" maxlength="1000"></textarea></div><div class="field"><label>活动规则</label><textarea class="textarea" name="rules" maxlength="1000"></textarea></div><button class="button button-primary" type="submit">创建活动</button></form><ul class="admin-list">${state.activities.length ? state.activities.map((activity) => `<li class="admin-row"><span><strong>${escapeHtml(activity.title)}</strong><small class="admin-note">${escapeHtml(activity.desc)} · ${escapeHtml(activity.date || "时间待定")} · ${escapeHtml(activity.status)}</small></span></li>`).join("") : '<li class="empty">暂无活动。</li>'}</ul></div>`;
+    if (adminTab === "芳菲之选") {
+      const picks = state.featuredPicks || [];
+      const publicOptions = state.works.filter(isPublicWork);
+      return `<div class="panel admin-panel"><h2 class="section-title">芳菲之选</h2><p class="muted">标记值得阅读的公开作品，可附一句推荐理由。记录会显示作品与评选人。</p><form id="admin-featured-pick-form" class="admin-form"><div class="field"><label>作品</label><select class="select" name="workId" required>${publicOptions.map((work) => `<option value="${work.id}">${escapeHtml(work.title)} · ${escapeHtml(work.author)}</option>`).join("") || '<option value="">暂无公开作品</option>'}</select></div><div class="field"><label>推荐理由</label><textarea class="textarea" name="reason" maxlength="300" placeholder="例如：文字克制，情绪自然，是本周值得阅读的一篇作品。"></textarea></div><button class="button button-primary" type="submit">保存芳菲之选</button></form><h3 class="section-title">当前芳菲之选</h3><ul class="admin-list">${picks.length ? picks.map((pick) => `<li class="admin-row"><span><strong>${escapeHtml(workById(pick.workId)?.title || "作品")}</strong><small class="admin-note">${escapeHtml(pick.reason || "暂无推荐理由")} · 由 ${escapeHtml(pick.selectedByName || "管理员")} 评选</small></span><button class="button button-small button-danger" type="button" data-featured-pick-revoke="${numericId(pick.workId)}">撤销</button></li>`).join("") : '<li class="empty">暂无芳菲之选记录。</li>'}</ul></div>`;
+    }
+    if (adminTab === "文学活动") return `<div class="panel admin-panel"><h2 class="section-title">文学活动</h2><form id="admin-activity-form" class="admin-form"><div class="form-grid"><div class="field"><label>活动名称</label><input class="input" name="title" maxlength="80" required></div><div class="field"><label>活动类型</label><select class="select" name="activityType">${["主题征文", "读书会", "交流会", "作品点评", "社团活动"].map((value) => `<option>${value}</option>`).join("")}</select></div><div class="field"><label>状态</label><select class="select" name="status">${["筹备中", "报名中", "进行中", "已结束"].map((status) => `<option>${status}</option>`).join("")}</select></div><div class="field"><label>开始时间</label><input class="input" type="date" name="startsAt"></div><div class="field"><label>截止时间</label><input class="input" type="date" name="endsAt"></div></div><div class="field"><label>活动介绍</label><textarea class="textarea" name="description" maxlength="1000"></textarea></div><div class="field"><label>活动规则</label><textarea class="textarea" name="rules" maxlength="1000"></textarea></div><div class="field"><label>相关作品（可多选，按住 Ctrl / Cmd）</label><select class="select" name="relatedWorkIds" multiple size="5">${state.works.filter(isPublicWork).map((work) => `<option value="${work.id}">${escapeHtml(work.title)} · ${escapeHtml(work.author)}</option>`).join("")}</select></div><button class="button button-primary" type="submit">创建活动</button></form><ul class="admin-list">${state.activities.length ? state.activities.map((activity) => `<li class="admin-row"><span><strong>${escapeHtml(activity.title)}</strong><small class="admin-note">${escapeHtml(activity.type || "社团活动")} · ${escapeHtml(activity.desc)} · ${escapeHtml(activity.date || "时间待定")} · ${escapeHtml(activity.status)}</small></span></li>`).join("") : '<li class="empty">暂无活动。</li>'}</ul></div>`;
     if (adminTab === "每周话题") return `<div class="panel admin-panel"><h2 class="section-title">每周投稿话题</h2><form id="admin-topic-form" class="admin-form"><input type="hidden" name="topicId" value=""><div class="form-grid"><div class="field"><label>话题标题</label><input class="input" name="title" maxlength="80" required></div><div class="field"><label>状态</label><select class="select" name="status">${["DRAFT", "PUBLISHED", "ENDED", "ARCHIVED"].map((value) => `<option value="${value}">${escapeHtml(topicStatusLabel(value))}</option>`).join("")}</select></div><div class="field"><label>开始时间</label><input class="input" type="date" name="startAt"></div><div class="field"><label>截止时间</label><input class="input" type="date" name="endAt"></div></div><div class="field"><label>话题说明</label><textarea class="textarea" name="description" maxlength="1000"></textarea></div><button class="button button-primary" type="submit">保存话题</button></form><ul class="admin-list">${state.topics.length ? state.topics.map((topic) => `<li class="admin-row"><span><strong>${escapeHtml(topic.title)}</strong><small class="admin-note">${escapeHtml(topicStatusLabel(topic.status))} · ${escapeHtml(topic.startAt || "待定")} 至 ${escapeHtml(topic.endAt || "待定")} · ${topic.submissions} 篇投稿</small></span><span class="admin-row-actions"><button class="button button-small" type="button" data-topic-edit="${topic.id}">编辑</button><button class="button button-small" type="button" data-topic-status="${topic.id}" data-status="PUBLISHED">发布</button><button class="button button-small" type="button" data-topic-status="${topic.id}" data-status="ENDED">结束</button><button class="button button-small button-quiet" type="button" data-topic-status="${topic.id}" data-status="ARCHIVED">归档</button></span></li>`).join("") : '<li class="empty">暂无话题。</li>'}</ul></div>`;
     if (adminTab === "风控") return `<div class="panel admin-panel"><h2 class="section-title">异常行为与风控</h2><div class="admin-grid"><div class="metric"><strong>${state.riskEvents.filter((item) => item.status === "pending").length}</strong><span>待处理风险</span></div><div class="metric"><strong>${state.plagiarismFlags.length}</strong><span>疑似相似作品</span></div><div class="metric"><strong>${state.reports.filter((item) => String(item.reason || "").includes("版权")).length}</strong><span>版权举报</span></div></div>${state.plagiarismFlags.length ? `<h3 class="section-title">疑似相似作品</h3><ul class="admin-list">${state.plagiarismFlags.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.workTitle || "作品")}</strong><small class="admin-note">与《${escapeHtml(item.matchedTitle || "未知作品")}》相似度 ${item.score}% · ${escapeHtml(item.level)} · ${escapeHtml(item.at)}</small></span><button class="button button-small" type="button" data-work="${item.workId}">查看</button></li>`).join("")}</ul>` : ""}<h3 class="section-title">风险记录</h3><ul class="admin-list">${state.riskEvents.length ? state.riskEvents.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.userName)} · ${escapeHtml(item.kind)}</strong><small class="admin-note">${escapeHtml(item.level)} · ${escapeHtml(item.detail)} · ${escapeHtml(item.status)} · ${escapeHtml(item.at)}</small></span><span class="admin-row-actions"><button class="button button-small" type="button" data-risk-action="${item.id}" data-action="normal">标记正常</button><button class="button button-small" type="button" data-risk-action="${item.id}" data-action="excluded">排除统计</button><button class="button button-small" type="button" data-risk-action="${item.id}" data-action="restored">恢复统计</button><button class="button button-small button-quiet" type="button" data-risk-action="${item.id}" data-action="limited">限制互动</button></span></li>`).join("") : '<li class="empty">暂无风险记录。</li>'}</ul></div>`;
     if (adminTab === "公告") return `<div class="admin-announcement"><div class="field"><label>公告标题</label><input class="input" id="admin-ann-title" maxlength="80" placeholder="例如：十月共读会开始报名"></div><div class="field"><label>公告内容</label><textarea class="textarea" id="admin-ann-content" maxlength="1000" placeholder="填写需要告知全体用户的简短内容"></textarea></div><button class="button button-primary" type="button" id="admin-ann-create">发布公告</button></div><ul class="admin-list">${state.announcements.length ? state.announcements.map((item) => `<li class="admin-row"><span><strong>${escapeHtml(item.title)}</strong><small class="admin-note">${escapeHtml(item.status === "pinned" ? "已置顶" : item.status === "published" ? "已发布" : "已归档")} · 已确认 ${Number(item.confirmedCount) || 0} / 未确认 ${Number(item.unconfirmedCount) || 0} · ${escapeHtml(item.content)}</small></span><span class="admin-row-actions"><button class="button button-small" type="button" data-ann-pin="${item.id}">${item.status === "pinned" ? "取消置顶" : "置顶"}</button><button class="button button-small ${item.status === "published" || item.status === "pinned" ? "button-quiet" : "button-primary"}" type="button" data-ann-toggle="${item.id}">${item.status === "published" || item.status === "pinned" ? "撤回" : "发布"}</button><button class="button button-small button-danger" type="button" data-ann-delete="${item.id}">归档</button></span></li>`).join("") : '<li class="empty">暂无公告。</li>'}</ul>`;
@@ -1328,11 +1686,61 @@
     return `<div class="panel admin-panel"><h2 class="section-title">${escapeHtml(adminTab)}</h2><p class="muted">当前分类没有待处理记录。</p></div>`;
   }
 
+  const NOTIFICATION_KINDS = {
+    comment: ["互动", "评论"],
+    like: ["互动", "点赞"],
+    follow: ["社交", "关注"],
+    author_new_work: ["社交", "作者新作"],
+    message: ["社交", "私信"],
+    chapter_update: ["作品", "新章节"],
+    chapter: ["作品", "章节审核"],
+    work: ["作品", "作品审核"],
+    award: ["作品", "获奖"],
+    activity: ["活动", "文学活动"],
+    report: ["系统", "举报处理"],
+    admin: ["系统", "管理通知"],
+    system: ["系统", "系统通知"],
+    announcement_confirm: ["系统", "公告确认"]
+  };
+
+  function notificationMeta(item) {
+    const [category, label] = NOTIFICATION_KINDS[item.type] || ["系统", item.type || "通知"];
+    return { category, label };
+  }
+
   function renderNotifications() {
-    if (!ensureLoggedIn()) return;
+    if (state.currentUser?.role === "guest" || !state.currentUser?.id) return renderMissing("请先登录后查看通知中心");
     const items = state.notifications.filter((item) => item.type !== "announcement_confirm");
-    openModal("通知中心", items.length ? `<ul class="admin-list notification-list">${items.map((item) => `<li class="admin-row ${item.read ? "" : "is-unread"}"><span><strong>${escapeHtml(item.text)}</strong><small class="admin-note">${escapeHtml(item.type || "站内通知")} · ${escapeHtml(item.at || "")}</small></span>${item.link ? `<button class="button button-small" type="button" data-notification-link="${escapeHtml(item.link)}">查看</button>` : ""}</li>`).join("")}</ul>` : "<p>暂无通知。</p>", '<div class="modal-actions"><button class="button" type="button" data-close-modal>关闭</button></div>');
-    performAction("/api/notifications/read", {}, "", () => renderHeader());
+    const categories = ["全部", "系统", "作品", "互动", "社交"];
+    const counts = {};
+    categories.forEach((category) => {
+      counts[category] = category === "全部" ? items.length : items.filter((item) => notificationMeta(item).category === category).length;
+    });
+    const unread = items.filter((item) => !item.read).length;
+    notificationFilter = categories.includes(notificationFilter) ? notificationFilter : "全部";
+    const visible = notificationFilter === "全部" ? items : items.filter((item) => notificationMeta(item).category === notificationFilter);
+    const tabs = categories.map((category) => `<button class="filter-chip ${notificationFilter === category ? "is-active" : ""}" type="button" data-notification-filter="${category}">${category} ${counts[category]}</button>`).join("");
+    const list = visible.length
+      ? `<ul class="admin-list notification-list">${visible.map((item) => {
+          const meta = notificationMeta(item);
+          return `<li class="admin-row ${item.read ? "" : "is-unread"}"><span><strong>${escapeHtml(item.text)}</strong><small class="admin-note">${escapeHtml(meta.label)} · ${escapeHtml(item.at || "")}</small></span><div class="admin-row-actions">${item.link ? `<button class="button button-small button-primary" type="button" data-notification-link="${escapeHtml(item.link)}" data-notification-id="${escapeHtml(item.id)}">查看</button>` : ""}${item.read ? "" : `<button class="button button-small" type="button" data-notification-read="${escapeHtml(item.id)}">标记已读</button>`}</div></li>`;
+        }).join("")}</ul>`
+      : '<div class="empty compact-empty">这个分类下还没有通知。</div>';
+    app.innerHTML = `<div class="page notification-page"><header class="page-head"><div><p class="eyebrow">站内消息</p><h1 class="page-title">通知中心</h1><p class="page-note">共 ${items.length} 条通知，其中 ${unread} 条未读。</p></div>${unread ? '<button class="button button-small" type="button" data-notification-read-all>全部标记已读</button>' : ""}</header><div class="toolbar notification-toolbar">${tabs}</div>${list}</div>`;
+  }
+
+
+  function openReportHandler(reportId) {
+    const report = state.reports.find((item) => numericId(item.id) === numericId(reportId));
+    if (!report) return showToast("举报记录不存在");
+    const status = report.status === "待处理" ? "处理中" : report.status;
+    openModal("处理举报", `<div class="report-summary"><strong>${escapeHtml(report.target)} · ${escapeHtml(report.reason)}</strong><small>${escapeHtml(report.type || "举报")} · 风险 ${escapeHtml(report.risk || "未评估")} · 举报人 ${escapeHtml(report.reporter || "匿名")}</small>${report.riskReasons && report.riskReasons.length ? `<small>${escapeHtml(report.riskReasons.join("；"))}</small>` : ""}</div><div class="field"><label>处置动作</label><select class="select" id="report-action"><option value="">仅更新状态</option><option value="驳回">驳回</option><option value="要求补充材料">要求补充材料</option><option value="暂时隐藏">暂时隐藏被举报</option><option value="确认侵权并下架">确认侵权并下架</option></select></div><div class="field"><label>处理状态</label><select class="select" id="report-status"><option value="处理中" ${status === "处理中" ? "selected" : ""}>处理中</option><option value="已处理" ${report.status === "已处理" ? "selected" : ""}>已处理</option><option value="已驳回" ${report.status === "已驳回" ? "selected" : ""}>已驳回</option></select></div><p class="muted">确认侵权并下架或暂时隐藏仅作用于作品或书友分享，处理记录会写入审计日志。</p>`, '<div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button button-primary" type="button" id="submit-report-handler">提交处理</button></div>');
+    document.querySelector("#report-action")?.addEventListener("change", (event) => { if (!event.target.value) return; const statusSelect = document.querySelector("#report-status"); if (statusSelect) statusSelect.value = "已处理"; });
+    document.querySelector("#submit-report-handler")?.addEventListener("click", async () => {
+      const action = String(document.querySelector("#report-action")?.value || "");
+      const nextStatus = String(document.querySelector("#report-status")?.value || "处理中");
+      await performAction(`/api/admin/reports/${numericId(reportId)}/status`, { status: nextStatus, action }, "举报已处理", () => { closeModal(); renderAdmin(); });
+    });
   }
 
   function renderSerialManager(workId) {
@@ -1532,11 +1940,16 @@
     const chapterLink = (target, label, className) => target
       ? `<button class="${className}" type="button" data-route="chapter/${target.id}">${label}</button>`
       : `<button class="${className}" type="button" disabled>${label}</button>`;
+    const author = authorById((work.authorId || authorIdByName(work.author)));
+    const favorited = state.favoritedWorks.includes(work.id);
+    const following = state.followedWorks.includes(work.id);
+    const chapterProgress = chapters.length ? Math.round(((Math.max(0, index) + 1) / chapters.length) * 100) : 0;
     app.innerHTML = `<div class="page reader-page">
-      <div class="reader-toolbar"><button class="link-button" type="button" data-route="work/${work.id}">← 返回作品</button><div class="reader-toolbar-actions"><button class="button button-small" type="button" id="reader-settings-toggle">阅读设置</button><button class="button button-small" type="button" id="reader-catalog-toggle">目录</button></div></div>
+      <div class="reading-progress" id="reader-reading-progress"></div>
+      <div class="reader-toolbar"><button class="link-button" type="button" data-route="work/${work.id}">← 返回作品</button><div class="reader-toolbar-actions"><button class="button button-small ${favorited ? "is-active" : ""}" type="button" data-reader-favorite="${work.id}" data-reader-chapter="${chapter.id}">${favorited ? "已收藏" : "收藏"}</button>${isSerialWork(work) ? `<button class="button button-small ${following ? "is-active" : ""}" type="button" data-reader-follow="${work.id}" data-reader-chapter="${chapter.id}">${following ? "✓ 已追更" : "＋ 追更"}</button>` : ""}<button class="button button-small" type="button" id="reader-settings-toggle">阅读设置</button><button class="button button-small" type="button" id="reader-catalog-toggle">目录</button></div></div>
       ${readerSettingsHtml()}
       <article class="chapter-reader" id="chapter-reader">
-        <header class="chapter-reader-head"><p class="reader-work"><button class="link-button" type="button" data-route="work/${work.id}">${escapeHtml(work.title)}</button></p><h1>${escapeHtml(chapter.title)}</h1><div class="reader-meta"><span>第 ${chapter.chapterNumber} 章</span><span>${chapterWordCount(chapter)} 字</span>${chapter.publishedAt ? `<time>${escapeHtml(formatDate(chapter.publishedAt))}</time>` : ""}</div></header>
+        <header class="chapter-reader-head"><p class="reader-work"><button class="link-button" type="button" data-route="work/${work.id}">${escapeHtml(work.title)}</button></p><h1>${escapeHtml(chapter.title)}</h1><div class="reader-meta"><span>第 ${chapter.chapterNumber} / ${chapters.length} 章</span><span>阅读进度 ${chapterProgress}%</span>${author ? `<button class="link-button" type="button" data-author="${author.id}">作者：${escapeHtml(author.name)}</button>` : `<span>作者：${escapeHtml(work.author || "匿名作者")}</span>`}<span>${chapterWordCount(chapter)} 字</span>${chapter.publishedAt ? `<time>${escapeHtml(formatDate(chapter.publishedAt))}</time>` : ""}</div></header>
         <div class="chapter-reader-body">${paragraphs.length ? paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("") : '<p class="muted">本章暂无正文。</p>'}</div>
       </article>
       ${chapterCommentSectionHtml(work, chapter)}
@@ -1564,6 +1977,17 @@
     const toggleCatalog = () => { if (catalogPanel) catalogPanel.hidden = !catalogPanel.hidden; };
     document.querySelector("#reader-catalog-toggle")?.addEventListener("click", toggleCatalog);
     document.querySelector("#reader-catalog-toggle-2")?.addEventListener("click", toggleCatalog);
+    if (readerScrollHandler) window.removeEventListener("scroll", readerScrollHandler);
+    readerScrollHandler = () => {
+      const article = document.querySelector("#chapter-reader");
+      const bar = document.querySelector("#reader-reading-progress");
+      if (!article || !bar) return;
+      const total = Math.max(1, article.offsetHeight - window.innerHeight);
+      const progress = Math.min(1, Math.max(0, -article.getBoundingClientRect().top / total));
+      bar.style.transform = `scaleX(${progress})`;
+    };
+    window.addEventListener("scroll", readerScrollHandler, { passive: true });
+    readerScrollHandler();
   }
 
   function openPublish(workId = "", topicId = "") {
@@ -1596,7 +2020,7 @@
               <div class="form-grid"><div class="field"><label>作品标题</label><input class="input" name="title" maxlength="80" value="${escapeHtml(existing?.title || "")}" required autofocus></div><div class="field"><label>作品类型</label><select class="select" name="category">${categories.slice(1).map((category) => `<option ${existing?.category === category ? "selected" : ""}>${category}</option>`).join("")}</select></div></div>
               <div class="form-grid"><div class="field"><label>作品形式</label><select class="select" name="workFormat"><option value="single" ${existing?.workFormat === "serial" ? "" : "selected"}>单篇作品</option><option value="serial" ${existing?.workFormat === "serial" ? "selected" : ""}>连载作品</option></select></div><div class="field" id="serial-status-field"><label>连载状态</label><select class="select" name="serialStatus">${Object.entries(serialStatusLabels).map(([value, label]) => `<option value="${value}" ${((existing?.serialStatus || "ONGOING") === value) ? "selected" : ""}>${label}</option>`).join("")}</select></div></div>
               <div class="field"><label>标签</label><input class="input" name="tags" maxlength="120" value="${escapeHtml((existing?.tags || []).join("，"))}" placeholder="多个标签用逗号分隔"></div>
-              <div class="field"><label>作品简介</label><textarea class="textarea" name="excerpt" maxlength="200" placeholder="一句话说明作品内容，可选">${escapeHtml(existing?.excerpt || "")}</textarea></div>
+              <div class="field"><label>作品简介</label><textarea class="textarea" name="excerpt" maxlength="200" placeholder="一句话说明作品内容，可选">${escapeHtml(existing?.excerpt || "")}</textarea></div><div class="field"><label>首页摘句（可选）</label><input class="input" name="quoteText" maxlength="160" value="${escapeHtml(existing?.quoteText || "")}" placeholder="选一句正文里的话，用于首页今日一句"></div>
             </section>
             <section class="publish-card publish-editor-card">
               <div class="publish-section-head"><span>02</span><div><h3>正文</h3><p>用空行分隔段落。提交前请检查作品完整性。</p></div></div>
@@ -1652,6 +2076,7 @@
         serialStatus: String(data.get("serialStatus") || "ONGOING"),
         tags: String(data.get("tags") || "").split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
         excerpt: String(data.get("excerpt") || "").trim(),
+        quoteText: String(data.get("quoteText") || "").trim(),
         body: bodyParts,
         isPublic: data.get("isPublic") === "on",
         allowComments: data.get("allowComments") === "on",
@@ -1691,6 +2116,16 @@
     return performAction(`/api/works/${numericId(workId)}/favorite`, {}, "", () => renderWork(workId));
   }
 
+  async function toggleReaderFavorite(workId, chapterId) {
+    if (!ensureLoggedIn()) return;
+    await performAction(`/api/works/${numericId(workId)}/favorite`, {}, "", () => renderChapterReader(chapterId));
+  }
+
+  async function toggleReaderFollow(workId, chapterId) {
+    if (!ensureLoggedIn()) return;
+    await performAction(`/api/works/${numericId(workId)}/follow`, {}, "", () => renderChapterReader(chapterId));
+  }
+
   async function shareWork(workId) {
     const work = workById(workId);
     if (!work) return;
@@ -1714,7 +2149,7 @@
       const data = new FormData(document.querySelector("#report-work-form"));
       const reason = String(data.get("reason") || "");
       await performAction("/api/reports", {
-        type: reason.includes("版权") ? "版权举报" : "作品",
+        type: reason.includes("版权") ? "版权 / 疑似抄袭" : "作品",
         targetId: work.id,
         target: work.title,
         reason,
@@ -1733,10 +2168,20 @@
     const rawWork = route.startsWith("work/") ? workById(route.split("/")[1]) : null;
     const work = rawWork?.status === "published" && rawWork?.visibility !== "PRIVATE" ? rawWork : null;
     const author = route.startsWith("author/") ? authorById(route.split("/")[1]) : null;
-    const title = work ? `${work.title}｜芳菲文学社` : author ? `${author.name}｜芳菲文学社` : "芳菲文学社｜写作、阅读与相遇";
+    const title = work ? `${work.title}｜芳菲文学社` : author ? `${author.name}｜芳菲文学社` : route === "search" ? "搜索｜芳菲文学社" : "芳菲文学社｜写作、阅读与相遇";
+    const summary = work?.excerpt || author?.bio || "芳菲文学社，面向青年作者的文学作品创作与交流平台。";
+    const url = `${location.origin}${location.pathname}#/${route}`;
     document.title = title;
-    const description = document.querySelector('meta[name="description"]');
-    if (description) description.setAttribute("content", work?.excerpt || author?.bio || "芳菲文学社，面向青年作者的文学作品创作与交流平台。");
+    const setMeta = (selector, attr, value) => { const node = document.querySelector(selector); if (node) node.setAttribute(attr, value); };
+    setMeta('meta[name="description"]', "content", summary);
+    setMeta('meta[property="og:title"]', "content", title);
+    setMeta('meta[property="og:description"]', "content", summary);
+    setMeta('meta[property="og:url"]', "content", url);
+    setMeta('meta[name="twitter:title"]', "content", title);
+    setMeta('meta[name="twitter:description"]', "content", summary);
+    let canonical = document.querySelector('link[rel="canonical"]');
+    if (!canonical) { canonical = document.createElement("link"); canonical.rel = "canonical"; document.head.appendChild(canonical); }
+    canonical.setAttribute("href", url);
   }
 
   function render() {
@@ -1744,6 +2189,7 @@
     updatePageMetadata();
     renderHeader();
     if (route === "home") return renderHome();
+    if (route === "search") return renderSearch();
     if (route === "works") return renderWorks();
     if (route.startsWith("serial/")) return renderSerialManager(route.split("/")[1]);
     if (route.startsWith("chapter/")) return renderChapterReader(route.split("/")[1]);
@@ -1752,7 +2198,11 @@
     if (route.startsWith("author/")) return renderAuthor(route.split("/")[1]);
     if (route === "messages") return renderMessages();
     if (route === "monthly") return renderMonthly();
+    if (route === "notifications") return renderNotifications();
     if (route === "ranking") return renderRanking();
+    if (route === "start") return renderStartHere();
+    if (route === "journal") return renderJournal();
+    if (route === "archive") return renderArchive();
     if (route === "activities") return renderActivities();
     if (route === "topics") return renderTopics();
     if (route === "book-shares") return renderBookShares();
@@ -1798,9 +2248,10 @@
     if (target.matches("[data-profile-password]")) return openChangePassword();
     if (target.matches("[data-profile-edit]")) return openProfileEditor();
     if (target.matches("[data-profile-tab]")) { profileTab = target.dataset.profileTab; return renderProfile(); }
+    if (target.matches("[data-workbench-filter]")) { workbenchFilter = target.dataset.workbenchFilter; return renderProfile(); }
     if (target.matches("[data-logout]")) return logoutAccount();
     if (target.matches("[data-open-settings]")) return openSettings();
-    if (target.matches("[data-nav-notify]")) return renderNotifications();
+    if (target.matches("[data-nav-notify]")) return setRoute("notifications");
     if (target.matches("[data-nav-profile]")) return openProfile();
     if (target.matches("[data-close-modal], #modal-close")) return closeModal();
     if (target.matches("[data-edit-work]")) return openPublish(target.dataset.editWork);
@@ -1811,19 +2262,39 @@
     if (target.matches("[data-shelf-status]")) return setShelfStatus(target.dataset.shelfStatus, target.dataset.shelfState);
     if (target.matches("[data-work-delete]")) return deleteOwnWork(target.dataset.workDelete);
     if (target.matches("[data-work-versions]")) return openWorkVersions(target.dataset.workVersions);
+    if (target.matches("[data-profile-featured]")) return openFeaturedWorksEditor();
+    if (target.matches("[data-random-work]")) return openRandomWork(target.dataset.randomWork);
+    if (target.matches("[data-start-filter]")) {
+      const key = target.dataset.startFilter;
+      searchTerm = ""; workFilter = "全部"; workTagFilter = ""; workAuthorFilter = ""; workFormatFilter = "all"; workSerialFilter = "all"; workPeriodFilter = "all";
+      if (key === "serial") workFormatFilter = "serial";
+      else if (categories.includes(key)) workFilter = key;
+      else workTagFilter = key;
+      saveWorkFilters();
+      return setRoute("works");
+    }
     if (target.matches("[data-rank-period]")) { rankingPeriod = target.dataset.rankPeriod; return renderRanking(); }
     if (target.matches("[data-rank-board]")) { rankingBoard = target.dataset.rankBoard; return renderRanking(); }
     if (target.matches("[data-rank-author-metric]")) { rankingAuthorMetric = target.dataset.rankAuthorMetric; return renderRanking(); }
     if (target.matches("[data-announcement-history]")) return openAnnouncementHistory();
     if (target.matches("[data-notification-link]")) { const link = String(target.dataset.notificationLink || "").replace(/^#\//, ""); closeModal(); if (link) return setRoute(link); }
+    if (target.matches("[data-notification-filter]")) { notificationFilter = target.dataset.notificationFilter; return renderNotifications(); }
+    if (target.matches("[data-notification-read-all]")) return performAction("/api/notifications/read", {}, "已全部标记为已读", () => renderNotifications());
+    if (target.matches("[data-notification-read]")) return performAction(`/api/notifications/${numericId(target.dataset.notificationRead)}/read`, {}, "已标记为已读", () => renderNotifications());
     if (target.matches("[data-book-share-new]")) return openBookShareEditor();
     if (target.matches("[data-book-share-sort]")) { bookShareSort = target.dataset.bookShareSort; return renderBookShares(); }
     if (target.matches("[data-book-share-edit]")) return openBookShareEditor(target.dataset.bookShareEdit);
     if (target.matches("[data-book-share-delete]")) return deleteBookShare(target.dataset.bookShareDelete);
     if (target.matches("[data-book-share-praise]")) return performAction(`/api/book-shares/${numericId(target.dataset.bookSharePraise)}/praise`, {}, "", () => renderBookShares());
     if (target.matches("[data-book-share-report]")) return reportBookShareDialog(target.dataset.bookShareReport);
+    if (target.matches("[data-clear-work-filters]")) return clearWorkFilters();
+    if (target.matches("[data-filter]")) { workFilter = target.dataset.filter; saveWorkFilters(); return renderWorks(); }
+    if (target.matches("[data-report-handle]")) return openReportHandler(target.dataset.reportHandle);
+    if (target.matches("[data-search-clear]")) { globalSearchTerm = ""; return renderSearch(); }
     if (target.matches("[data-route]")) return setRoute(target.dataset.route);
     if (target.matches("[data-like-work]")) return toggleWorkLike(target.dataset.likeWork);
+    if (target.matches("[data-reader-favorite]")) return toggleReaderFavorite(target.dataset.readerFavorite, target.dataset.readerChapter);
+    if (target.matches("[data-reader-follow]")) return toggleReaderFollow(target.dataset.readerFollow, target.dataset.readerChapter);
     if (target.matches("[data-favorite-work]")) return toggleWorkFavorite(target.dataset.favoriteWork);
     if (target.matches("[data-share-work]")) return shareWork(target.dataset.shareWork);
     if (target.matches("[data-report-work]")) return reportWorkDialog(target.dataset.reportWork);
@@ -1844,7 +2315,7 @@
       render();
       return showToast("主题已切换");
     }
-    if (target.matches("[data-activity]")) { const activity = byId(target.dataset.activity, state.activities); return openModal(activity.title, `<p>${escapeHtml(activity.desc)}</p><p class="muted">活动时间：${escapeHtml(activity.date)} · 当前状态：${escapeHtml(activity.status)}。报名通知会出现在站内消息中。</p>`); }
+    if (target.matches("[data-activity]")) { const activity = byId(target.dataset.activity, state.activities); if (!activity) return; const related = (activity.relatedWorkIds || []).map(workById).filter(Boolean); return openModal(activity.title, `<p class="eyebrow">${escapeHtml(activity.type || "社团活动")}</p><p>${escapeHtml(activity.desc || "暂无活动介绍。")}</p><p class="muted">活动时间：${escapeHtml(activity.date || "时间待定")} · 当前状态：${escapeHtml(activity.status)}。</p>${activity.rules ? `<h3 class="section-title">活动规则</h3><p>${escapeHtml(activity.rules).replace(/\n/g, "<br>")}</p>` : ""}${related.length ? `<h3 class="section-title">相关作品</h3><div class="tag-row">${related.map((work) => `<button class="link-button" type="button" data-work="${work.id}">${escapeHtml(work.title)}</button>`).join("")}</div>` : ""}<div class="modal-actions"><button class="button" type="button" data-close-modal>关闭</button></div>`); }
   });
 
   document.querySelector("#nav-toggle")?.addEventListener("click", () => setNavOpen(!document.body.classList.contains("nav-open")));
@@ -1852,7 +2323,7 @@
   document.querySelector("#site-nav")?.addEventListener("click", (event) => { if (event.target.closest("button")) closeNav(); });
   window.addEventListener("resize", () => { if (window.innerWidth > 980) closeNav(); });
   document.querySelector("#publish-button").addEventListener("click", () => openPublish());
-  document.querySelector("#notification-button").addEventListener("click", renderNotifications);
+  document.querySelector("#notification-button").addEventListener("click", () => setRoute("notifications"));
   document.querySelector("#user-button").addEventListener("click", openProfile);
   modalLayer.addEventListener("click", (event) => { if (event.target === modalLayer) closeModal(); });
   document.addEventListener("keydown", (event) => {
